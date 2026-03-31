@@ -122,6 +122,45 @@ public class BacktestApiController {
         return ResponseEntity.ok(result);
     }
 
+    @PostMapping("/candle-cache/import-csv")
+    public ResponseEntity<Map<String, Object>> importCsv(
+            @RequestBody String csvBody,
+            @RequestParam(defaultValue = "5") int interval) {
+        Map<String, Object> result = new LinkedHashMap<String, Object>();
+        int inserted = 0, skipped = 0, errors = 0;
+        String[] lines = csvBody.split("\n");
+        Set<String> seen = new HashSet<String>();
+        for (int i = 1; i < lines.length; i++) {
+            String line = lines[i].trim();
+            if (line.isEmpty()) continue;
+            String[] p = line.split(",");
+            if (p.length < 7) { errors++; continue; }
+            try {
+                String sym = p[0].trim();
+                String ts = p.length > 7 ? p[2].trim() : p[1].trim();  // name컬럼 있으면 인덱스 조정
+                int oi = p.length > 7 ? 3 : 2;
+                String key = sym + "|" + ts;
+                if (!seen.add(key)) { skipped++; continue; }
+                com.example.stocks.db.CandleCacheEntity e = new com.example.stocks.db.CandleCacheEntity();
+                e.setSymbol(sym);
+                e.setIntervalMin(interval);
+                e.setCandleTsUtc(ts);
+                e.setOpenPrice(Double.parseDouble(p[oi].trim()));
+                e.setHighPrice(Double.parseDouble(p[oi+1].trim()));
+                e.setLowPrice(Double.parseDouble(p[oi+2].trim()));
+                e.setClosePrice(Double.parseDouble(p[oi+3].trim()));
+                e.setVolume(Double.parseDouble(p[oi+4].trim()));
+                candleCacheService.saveIfNotExists(e);
+                inserted++;
+            } catch (Exception ex) { errors++; }
+        }
+        result.put("status", "done");
+        result.put("inserted", inserted);
+        result.put("skipped", skipped);
+        result.put("errors", errors);
+        return ResponseEntity.ok(result);
+    }
+
     // ===== Optimization API =====
 
     @PostMapping("/optimization/run")

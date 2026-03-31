@@ -189,6 +189,14 @@ public class CandleCacheService {
         return cacheRepo.countBySymbolAndIntervalMin(symbol, intervalMin) > 0;
     }
 
+    @org.springframework.transaction.annotation.Transactional
+    public void saveIfNotExists(CandleCacheEntity e) {
+        if (!cacheRepo.existsBySymbolAndIntervalMinAndCandleTsUtc(
+                e.getSymbol(), e.getIntervalMin(), e.getCandleTsUtc())) {
+            cacheRepo.save(e);
+        }
+    }
+
     // ===== Utilities =====
 
     private StockCandle toStockCandle(CandleCacheEntity e) {

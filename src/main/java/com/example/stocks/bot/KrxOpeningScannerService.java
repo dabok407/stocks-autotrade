@@ -382,7 +382,7 @@ public class KrxOpeningScannerService {
 
                     StrategyContext ctx = new StrategyContext(pe.getSymbol(), candleUnit, candles, pe, 0);
                     // Use MultiConfirmMomentum for exit evaluation
-                    TradingStrategy strategy = strategyFactory.get(StrategyType.MULTI_CONFIRM_MOMENTUM);
+                    TradingStrategy strategy = strategyFactory.get(StrategyType.BOLLINGER_SQUEEZE_BREAKOUT);
                     Signal signal = strategy.evaluate(ctx);
 
                     if (signal.action == SignalAction.SELL) {
@@ -476,7 +476,7 @@ public class KrxOpeningScannerService {
                     if (candles == null || candles.isEmpty()) continue;
 
                     StrategyContext ctx = new StrategyContext(symbol, candleUnit, candles, null, 0);
-                    TradingStrategy strategy = strategyFactory.get(StrategyType.MULTI_CONFIRM_MOMENTUM);
+                    TradingStrategy strategy = strategyFactory.get(StrategyType.BOLLINGER_SQUEEZE_BREAKOUT);
                     Signal signal = strategy.evaluate(ctx);
 
                     entryAttempts++;
