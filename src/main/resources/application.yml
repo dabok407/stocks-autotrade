@@ -1,0 +1,85 @@
+report:
+  apiKey: ${REPORT_API_KEY:changeme-replace-with-random-key}
+
+server:
+  port: 8081
+  servlet:
+    context-path: /stocks
+    session:
+      timeout: 4h
+      cookie:
+        name: STOCKS_SESSION
+        http-only: true
+        secure: ${SESSION_COOKIE_SECURE:false}
+        same-site: lax
+
+spring:
+  profiles:
+    active: h2
+  jackson:
+    serialization:
+      write-dates-as-timestamps: false
+  web:
+    resources:
+      cache:
+        period: 0
+        cachecontrol:
+          no-store: true
+  datasource:
+    url: jdbc:h2:file:./data/stockbot;MODE=MySQL;AUTO_SERVER=TRUE;DB_CLOSE_DELAY=-1
+    driver-class-name: org.h2.Driver
+    username: sa
+    password: ${H2_PASSWORD:}
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+  h2:
+    console:
+      enabled: false
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: true
+
+bot:
+  pollSeconds: 5
+  defaultStocks: ["005930","035420"]
+  defaultCandleUnitMinutes: 5
+
+strategy:
+  takeProfitRate: 0.03
+  feeRate: 0.00015
+
+trade:
+  globalBaseOrderKrw: 100000
+  slippageRate: 0.001
+  minOrderKrw: 10000
+
+kis:
+  appKey: ${KIS_APP_KEY:}
+  appSecret: ${KIS_APP_SECRET:}
+  accountNo: ${KIS_ACCOUNT_NO:}
+  isPaper: true
+  baseUrl: ${KIS_BASE_URL:https://openapivts.koreainvestment.com:29443}
+
+sso:
+  secret: ${SSO_SECRET:upbit-stocks-shared-sso-key-change-me}
+  partnerUrl: ${SSO_PARTNER_URL:https://mkgalaxy.kr/coin}
+  partnerLabel: "\uCF54\uC778\uBD07\uC73C\uB85C \uC774\uB3D9"
+
+app:
+  version: "@project.version@"
+  build-time: "@maven.build.timestamp@"
+
+logging:
+  level:
+    root: INFO
+    com.example.stocks.bot: INFO
+    org.apache.coyote.http11.Http11Processor: WARN
+    org.apache.coyote.http11.Http11InputBuffer: ERROR
+  file:
+    name: logs/stocktrade.log
+  pattern:
+    file: "%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level %logger{20} - %msg%n"
+    console: "%d{yyyy-MM-dd HH:mm:ss} %-5level %logger{20} - %msg%n"

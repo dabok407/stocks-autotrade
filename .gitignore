@@ -1,0 +1,55 @@
+# ===== Build =====
+target/
+!.mvn/wrapper/maven-wrapper.jar
+
+# ===== IDE =====
+.idea/
+*.iml
+*.ipr
+*.iws
+.project
+.classpath
+.settings/
+*.swp
+*~
+
+# ===== OS =====
+.DS_Store
+Thumbs.db
+nul
+desktop.ini
+
+# ===== Security / Credentials =====
+application-local.yml
+application-dev.yml
+application-prod.yml
+**/application-local.yml
+**/application-dev.yml
+**/application-prod.yml
+*.pem
+*.key
+*.p12
+*.jks
+
+# ===== Database (H2 local files) =====
+data/*.db
+data/*.mv.db
+data/*.lock.db
+data/*.trace.db
+
+# ===== Logs =====
+logs/
+*.log
+*.log.*
+*.gz
+
+# ===== Data =====
+data/candles/
+data/analysis/
+
+# ===== Compiled =====
+*.class
+
+# ===== Claude Agent =====
+.claude/
+CLAUDE.md

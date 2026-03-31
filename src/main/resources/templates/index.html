@@ -1,0 +1,11 @@
+<!DOCTYPE html>
+<html lang="ko" xmlns:th="http://www.thymeleaf.org">
+<head>
+  <meta charset="UTF-8">
+  <title>이동 중...</title>
+  <script>window.location.href = window.location.pathname.replace(/\/$/, '') + '/dashboard';</script>
+</head>
+<body>
+  <p><a th:href="@{/dashboard}">대시보드</a>로 이동 중...</p>
+</body>
+</html>

@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Stocks AutoTrade</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0%25' stop-color='%232b76ff'/%3E%3Cstop offset='100%25' stop-color='%2320c997'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='32' height='32' rx='6' fill='url(%23g)'/%3E%3Cpath d='M8 22 L14 12 L18 17 L24 8' stroke='white' stroke-width='2.5' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3Ccircle cx='24' cy='8' r='2.5' fill='white'/%3E%3C/svg%3E"/>
+  <style>
+    :root{
+      --bg0:#070a14;
+      --text:#e8eefc;
+      --muted:#9fb0d6;
+      --border:rgba(255,255,255,.10);
+      --primary:#2b76ff;
+      --success:#20c997;
+      --danger:#ff4d6d;
+      --radius:14px;
+    }
+    *{box-sizing:border-box}
+    html,body{height:100%;margin:0;padding:0}
+    body{
+      background:var(--bg0);
+      color:var(--text);
+      font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Oxygen,sans-serif;
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      min-height:100vh;
+      padding:20px;
+      position:relative;
+    }
+    body::before{
+      content:'';
+      position:fixed;
+      top:0; left:0; right:0;
+      height:60vh;
+      background: radial-gradient(ellipse 80% 50% at 50% -10%, rgba(43,118,255,0.15) 0%, rgba(124,77,255,0.06) 40%, transparent 70%);
+      pointer-events:none;
+    }
+
+    .login-card{
+      width:100%;
+      max-width:400px;
+      background:rgba(22,27,45,0.7);
+      backdrop-filter:blur(20px);
+      -webkit-backdrop-filter:blur(20px);
+      border:1px solid rgba(255,255,255,.06);
+      border-radius:var(--radius);
+      box-shadow:0 20px 50px rgba(0,0,0,.35);
+      padding:40px 32px;
+      position:relative;
+      z-index:1;
+      animation:fadeInUp .5s ease both;
+    }
+    @keyframes fadeInUp{
+      from{opacity:0;transform:translateY(16px)}
+      to{opacity:1;transform:translateY(0)}
+    }
+
+    .login-header{
+      text-align:center;
+      margin-bottom:32px;
+    }
+    .login-header .logo{
+      font-size:32px;
+      margin-bottom:8px;
+    }
+    .login-header h1{
+      font-size:22px;
+      font-weight:800;
+      margin:0 0 4px;
+      letter-spacing:-.5px;
+    }
+    .login-header p{
+      color:var(--muted);
+      font-size:13px;
+      margin:0;
+    }
+
+    .field{
+      margin-bottom:18px;
+    }
+    .field label{
+      display:block;
+      font-size:12px;
+      font-weight:700;
+      color:var(--muted);
+      margin-bottom:6px;
+      text-transform:uppercase;
+      letter-spacing:.5px;
+    }
+    .field input{
+      width:100%;
+      height:46px;
+      padding:0 14px;
+      font-size:15px;
+      color:var(--text);
+      background:rgba(255,255,255,.04);
+      border:1px solid var(--border);
+      border-radius:10px;
+      outline:none;
+      transition:border-color .2s, box-shadow .2s;
+    }
+    .field input:focus{
+      border-color:rgba(43,118,255,.55);
+      box-shadow:0 0 0 3px rgba(43,118,255,.28);
+    }
+    .field input::placeholder{
+      color:rgba(159,176,214,.4);
+    }
+
+    .login-btn{
+      width:100%;
+      height:48px;
+      border:none;
+      border-radius:10px;
+      background:linear-gradient(135deg, #2b76ff 0%, #7c4dff 100%);
+      color:#fff;
+      font-size:15px;
+      font-weight:700;
+      cursor:pointer;
+      transition:transform .2s, box-shadow .2s;
+      margin-top:8px;
+      box-shadow:0 4px 20px rgba(43,118,255,0.25);
+    }
+    .login-btn:hover{
+      transform:translateY(-2px);
+      box-shadow:0 8px 30px rgba(43,118,255,0.3);
+    }
+    .login-btn:active{
+      transform:translateY(0);
+    }
+    .login-btn:disabled{
+      opacity:.5;
+      cursor:not-allowed;
+      transform:none;
+    }
+
+    .error-msg{
+      color:var(--danger);
+      font-size:13px;
+      text-align:center;
+      margin-top:14px;
+      min-height:20px;
+    }
+
+    .info-msg{
+      color:var(--success);
+      font-size:13px;
+      text-align:center;
+      margin-top:14px;
+      min-height:20px;
+    }
+
+    .security-badge{
+      text-align:center;
+      margin-top:24px;
+      font-size:11px;
+      color:rgba(159,176,214,.5);
+    }
+    .security-badge span{
+      display:inline-flex;
+      align-items:center;
+      gap:4px;
+    }
+
+    .spinner{
+      display:inline-block;
+      width:16px;height:16px;
+      border:2px solid rgba(255,255,255,.2);
+      border-top-color:var(--text);
+      border-radius:50%;
+      animation:spin .6s linear infinite;
+      vertical-align:middle;
+      margin-right:6px;
+    }
+    @keyframes spin{to{transform:rotate(360deg)}}
+
+    @media(max-width:480px){
+      .login-card{padding:32px 24px}
+      .login-header h1{font-size:20px}
+      .field input{height:44px;font-size:14px}
+      .login-btn{height:46px;font-size:14px}
+    }
+  </style>
+</head>
+<body>
+
+<div class="login-card">
+  <div class="login-header">
+    <div class="logo">
+      <svg width="40" height="40" viewBox="0 0 32 32">
+        <defs><linearGradient id="lg" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#2b76ff"/><stop offset="100%" stop-color="#20c997"/></linearGradient></defs>
+        <rect width="32" height="32" rx="6" fill="url(#lg)"/>
+        <path d="M8 22 L14 12 L18 17 L24 8" stroke="white" stroke-width="2.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+        <circle cx="24" cy="8" r="2.5" fill="white"/>
+      </svg>
+    </div>
+    <h1>Stocks AutoTrade</h1>
+    <p>인증된 사용자만 접근할 수 있습니다</p>
+  </div>
+
+  <div class="field">
+    <label for="username">아이디</label>
+    <input type="text" id="username" placeholder="아이디 입력" autocomplete="username" autocapitalize="none" autofocus>
+  </div>
+
+  <div class="field">
+    <label for="password">비밀번호</label>
+    <input type="password" id="password" placeholder="비밀번호 입력" autocomplete="current-password">
+  </div>
+
+  <div style="display:flex;align-items:center;gap:8px;margin-bottom:16px">
+    <input type="checkbox" id="rememberIdChk" style="width:16px;height:16px;accent-color:var(--primary);cursor:pointer">
+    <label for="rememberIdChk" style="font-size:13px;color:var(--muted);cursor:pointer;user-select:none">아이디 기억</label>
+  </div>
+
+  <button class="login-btn" id="loginBtn">로그인</button>
+
+  <div class="error-msg" id="errorMsg"></div>
+  <div class="info-msg" id="infoMsg"></div>
+
+  <div class="security-badge">
+    <span>&#x1F512; RSA-2048 암호화 &middot; 세션 인증</span>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jsencrypt/3.3.2/jsencrypt.min.js"></script>
+<script>
+(function() {
+  var usernameEl = document.getElementById('username');
+  var passwordEl = document.getElementById('password');
+  var loginBtn = document.getElementById('loginBtn');
+  var errorMsg = document.getElementById('errorMsg');
+  var infoMsg = document.getElementById('infoMsg');
+  var rememberIdChk = document.getElementById('rememberIdChk');
+
+  // Restore remembered ID
+  var savedId = localStorage.getItem('rememberedId');
+  if (savedId) {
+    usernameEl.value = savedId;
+    rememberIdChk.checked = true;
+    passwordEl.focus();
+  }
+
+  var rsaPublicKey = null;
+
+  var params = new URLSearchParams(window.location.search);
+  if (params.get('expired') !== null) {
+    infoMsg.textContent = '다른 기기에서 로그인하여 현재 세션이 만료되었습니다.';
+  }
+  if (params.get('logout') !== null) {
+    infoMsg.textContent = '정상적으로 로그아웃되었습니다.';
+  }
+
+  // context-path 감지
+  var ctxPath = (function() {
+    var path = window.location.pathname;
+    var idx = path.indexOf('/login');
+    return idx > 0 ? path.substring(0, idx) : '';
+  })();
+
+  fetch(ctxPath + '/api/auth/pubkey')
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      rsaPublicKey = data.publicKey;
+    })
+    .catch(function(err) {
+      errorMsg.textContent = '보안키 로드 실패. 페이지를 새로고침하세요.';
+      loginBtn.disabled = true;
+    });
+
+  function doLogin() {
+    errorMsg.textContent = '';
+    infoMsg.textContent = '';
+
+    var username = usernameEl.value.trim();
+    var password = passwordEl.value;
+
+    if (!username || !password) {
+      errorMsg.textContent = '아이디와 비밀번호를 입력해주세요.';
+      return;
+    }
+
+    if (!rsaPublicKey) {
+      errorMsg.textContent = '보안키가 로드되지 않았습니다. 페이지를 새로고침하세요.';
+      return;
+    }
+
+    var encrypt = new JSEncrypt();
+    encrypt.setPublicKey('-----BEGIN PUBLIC KEY-----\n' + rsaPublicKey + '\n-----END PUBLIC KEY-----');
+
+    var encrypted = encrypt.encrypt(password);
+    if (!encrypted) {
+      errorMsg.textContent = '비밀번호 암호화에 실패했습니다. 페이지를 새로고침하세요.';
+      return;
+    }
+
+    loginBtn.disabled = true;
+    loginBtn.innerHTML = '<span class="spinner"></span>인증 중\u2026';
+
+    fetch(ctxPath + '/api/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        username: username,
+        encryptedPassword: encrypted
+      })
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      if (data.success) {
+        // Save or clear remembered ID
+        if (rememberIdChk.checked) {
+          localStorage.setItem('rememberedId', usernameEl.value.trim());
+        } else {
+          localStorage.removeItem('rememberedId');
+        }
+        loginBtn.innerHTML = '\u2713 로그인 성공';
+        loginBtn.style.borderColor = 'rgba(32,201,151,.55)';
+        loginBtn.style.background = 'rgba(32,201,151,.18)';
+        setTimeout(function() {
+          window.location.href = data.redirect || (ctxPath + '/dashboard');
+        }, 300);
+      } else {
+        errorMsg.textContent = data.message || '로그인에 실패했습니다.';
+        loginBtn.disabled = false;
+        loginBtn.textContent = '로그인';
+        passwordEl.value = '';
+        passwordEl.focus();
+      }
+    })
+    .catch(function(err) {
+      errorMsg.textContent = '서버 연결에 실패했습니다.';
+      loginBtn.disabled = false;
+      loginBtn.textContent = '로그인';
+    });
+  }
+
+  loginBtn.addEventListener('click', doLogin);
+
+  passwordEl.addEventListener('keydown', function(e) {
+    if (e.key === 'Enter') doLogin();
+  });
+  usernameEl.addEventListener('keydown', function(e) {
+    if (e.key === 'Enter') passwordEl.focus();
+  });
+})();
+</script>
+</body>
+</html>

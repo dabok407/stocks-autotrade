@@ -1,0 +1,924 @@
+<!doctype html>
+<html lang="ko" xmlns:th="http://www.thymeleaf.org">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover"/>
+  <title>Stocks AutoTrade - Settings</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0%25' stop-color='%232b76ff'/%3E%3Cstop offset='100%25' stop-color='%2320c997'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='32' height='32' rx='6' fill='url(%23g)'/%3E%3Cpath d='M8 22 L14 12 L18 17 L24 8' stroke='white' stroke-width='2.5' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3Ccircle cx='24' cy='8' r='2.5' fill='white'/%3E%3C/svg%3E"/>
+  <link rel="stylesheet" th:href="@{/css/autotrade.css(v=20260330a)}">
+</head>
+<body>
+
+<div class="toast-container" id="toastContainer"></div>
+
+<!-- ═══════ Header ═══════ -->
+<header class="header">
+  <div class="header-left">
+    <a class="logo" th:href="@{/dashboard}">
+      <div class="logo-icon">
+        <svg width="16" height="16" viewBox="0 0 32 32">
+          <path d="M8 22 L14 12 L18 17 L24 8" stroke="white" stroke-width="2.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+          <circle cx="24" cy="8" r="2.5" fill="white"/>
+        </svg>
+      </div>
+      <span>Stocks AutoTrade</span>
+    </a>
+    <nav class="nav-tabs">
+      <a class="nav-tab" th:href="@{/dashboard}">&#x1F4CA; 대시보드</a>
+      <a class="nav-tab active" th:href="@{/settings}">&#x2699;&#xFE0F; 설정</a>
+      <a class="nav-tab" th:href="@{/backtest}">&#x1F9EA; 백테스트</a>
+    </nav>
+  </div>
+  <div class="header-right">
+    <button class="header-btn" id="ssoPartnerBtn" title="SSO" style="display:none;font-size:16px">&#x1F504;</button>
+    <button class="header-btn" id="refreshBtn" title="새로고침" onclick="location.reload()">&#x21bb;</button>
+    <button class="header-btn" id="themeToggle" title="테마">&#x263e;</button>
+    <button class="header-btn" id="logoutBtn" title="로그아웃" style="color:var(--danger)">&#x23fb;</button>
+  </div>
+</header>
+
+<main class="page">
+  <div class="container">
+    <h1 class="page-title">설정</h1>
+    <p class="page-desc">봇 모드, 자본금, 타겟 전략 등 자동매매 설정을 관리합니다.</p>
+
+    <!-- ── 국장 기본 설정 Card ── -->
+    <div class="card" style="margin-bottom:16px">
+      <div class="card-header">
+        <div class="card-title">
+          <div class="card-icon" style="background:rgba(255,165,0,.15);color:#ffa500">&#x1F1F0;&#x1F1F7;</div>
+          국장 기본 설정 (KRX)
+        </div>
+      </div>
+      <div class="config-bar" style="grid-template-columns:1fr 1fr 1fr">
+        <div class="config-field">
+          <label>모드 <span class="help-icon" data-tooltip="PAPER: 모의투자 모드 (실제 주문 없음, 슬리피지 0.1% + 수수료 0.015% 시뮬레이션)&#10;LIVE: 실거래 모드 (실제 주문 실행)" aria-label="모드 도움말"></span></label>
+          <div class="select-wrap">
+            <select class="select" id="mode">
+              <option value="PAPER" selected>PAPER</option>
+              <option value="LIVE">LIVE</option>
+            </select>
+          </div>
+        </div>
+        <div class="config-field">
+          <label>자본금 (KRW) <span class="help-icon" data-tooltip="국장 자동매매에 사용할 총 자본금(원화)입니다.&#10;PCT 주문 모드에서 이 값의 비율만큼 주문합니다.&#10;실제 증권사 잔고 이하로 설정해야 합니다." aria-label="자본금 도움말"></span></label>
+          <input class="input" type="text" id="capital" value="100,000"/>
+          <small id="balanceHint" style="color:#8899aa;font-size:11px;margin-top:2px;display:none">예수금: <span id="balanceAmt">-</span>원</small>
+        </div>
+        <div class="config-field">
+          <label>API 키 <span class="help-icon" data-tooltip="한국투자증권 API 키 연결 상태를 테스트합니다.&#10;LIVE 모드 사용 시 API 키가 필요합니다." aria-label="API 키 도움말"></span></label>
+          <div style="display:flex;align-items:center;gap:8px;margin-top:2px">
+            <button class="btn primary" id="apiTestBtn" style="font-size:12px;padding:8px 16px;white-space:nowrap">API 테스트</button>
+          </div>
+        </div>
+      </div>
+      <div id="apiTestResult" style="display:none;position:relative;margin-top:12px;padding:12px 36px 12px 16px;border-radius:8px;border:1px solid var(--card-border);font-size:13px;line-height:1.6;white-space:pre-wrap;background:rgba(0,0,0,0.15)">
+        <span id="apiTestResultText"></span>
+        <button class="dismiss-btn" id="apiTestResultDismiss" title="닫기" aria-label="닫기">&#x2715;</button>
+      </div>
+    </div>
+
+    <!-- ── 미장 기본 설정 Card ── -->
+    <div class="card" style="margin-bottom:24px">
+      <div class="card-header">
+        <div class="card-title">
+          <div class="card-icon" style="background:rgba(100,100,255,.15);color:#6464ff">&#x1F1FA;&#x1F1F8;</div>
+          미장 기본 설정 (US)
+        </div>
+      </div>
+      <div class="config-bar" style="grid-template-columns:1fr 1fr 1fr">
+        <div class="config-field">
+          <label>모드 <span class="help-icon" data-tooltip="PAPER: 모의투자 모드 (실제 주문 없음)&#10;LIVE: 실거래 모드 (실제 주문 실행)" aria-label="모드 도움말"></span></label>
+          <div class="select-wrap">
+            <select class="select" id="usMode">
+              <option value="PAPER" selected>PAPER</option>
+              <option value="LIVE">LIVE</option>
+            </select>
+          </div>
+        </div>
+        <div class="config-field">
+          <label>자본금 (KRW) <span class="help-icon" data-tooltip="미장 자동매매에 사용할 총 자본금(원화)입니다.&#10;PCT 주문 모드에서 이 값의 비율만큼 주문합니다.&#10;실제 해외 예수금 이하로 설정해야 합니다." aria-label="자본금 도움말"></span></label>
+          <input class="input" type="text" id="usCapital" value="500,000"/>
+          <small id="usBalanceHint" style="color:#8899aa;font-size:11px;margin-top:2px;display:none">예수금: <span id="usBalanceAmt">-</span>원</small>
+        </div>
+        <div class="config-field">
+          <label>API 키 <span class="help-icon" data-tooltip="미장 API 키 연결 상태를 테스트합니다.&#10;LIVE 모드 사용 시 API 키가 필요합니다." aria-label="API 키 도움말"></span></label>
+          <div style="display:flex;align-items:center;gap:8px;margin-top:2px">
+            <button class="btn primary" id="usApiTestBtn" style="font-size:12px;padding:8px 16px;white-space:nowrap">API 테스트</button>
+          </div>
+        </div>
+      </div>
+      <div id="usApiTestResult" style="display:none;position:relative;margin-top:12px;padding:12px 36px 12px 16px;border-radius:8px;border:1px solid var(--card-border);font-size:13px;line-height:1.6;white-space:pre-wrap;background:rgba(0,0,0,0.15)">
+        <span id="usApiTestResultText"></span>
+        <button class="dismiss-btn" id="usApiTestResultDismiss" title="닫기" aria-label="닫기">&#x2715;</button>
+      </div>
+    </div>
+
+    <!-- ── Strategy Tabs ── -->
+    <div class="bt-tabs">
+      <div class="bt-tab active" data-tab="basic">&#x1F3AF; 타겟 전략</div>
+      <div class="bt-tab" data-tab="krxOpening">&#x1F4C5; 국장 오프닝</div>
+      <div class="bt-tab" data-tab="krxAllday">&#x2600;&#xFE0F; 국장 올데이</div>
+      <div class="bt-tab" data-tab="nyseOpening">&#x1F319; 미장 오프닝</div>
+      <div class="bt-tab" data-tab="nyseAllday">&#x1F30D; 미장 올데이</div>
+      <div class="bt-tab" data-tab="krxMorningRush">&#x1F680; 국장 모닝 러쉬</div>
+      <div class="bt-tab" data-tab="nyseMorningRush">&#x1F680; 미장 모닝 러쉬</div>
+    </div>
+
+    <!-- Tab: 타겟 전략 -->
+    <div class="settings-tab-content" id="settingsTabBasic">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:8px">
+        <div style="font-size:15px;font-weight:600;display:flex;align-items:center;gap:8px">
+          &#x1F3AF; 타겟 전략
+          <span class="help-icon" data-tooltip="타겟 전략: 종목 그룹별로 독립적인 전략/리스크 설정이 가능합니다.&#10;&#10;각 그룹은 자체 종목, 전략, TP/SL, 인터벌 등을 설정합니다.&#10;종목은 하나의 그룹에만 소속 가능합니다 (상호 배제)." aria-label="타겟 전략 도움말"></span>
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <button class="btn" id="importFromBt" type="button" style="font-size:11px;padding:6px 10px;background:rgba(43,118,255,.12);border:1px solid rgba(43,118,255,.3);color:var(--primary);border-radius:8px;cursor:pointer;white-space:nowrap">&#x1F4E5; 백테스트에서 불러오기</button>
+          <button class="btn primary" id="addGroupBtn" type="button" style="font-size:11px;padding:6px 12px;white-space:nowrap">+ 그룹 추가</button>
+        </div>
+      </div>
+      <div class="strategy-groups" id="groupsContainer">
+        <!-- Group cards rendered by JS -->
+      </div>
+    </div>
+
+    <!-- Tab: KRX 오프닝 -->
+    <div class="settings-tab-content" id="settingsTabKrxOpening" style="display:none">
+      <div class="card" style="margin-bottom:24px;padding:0;overflow:hidden">
+        <div class="card-header" style="display:flex;align-items:center;justify-content:space-between">
+          <div class="card-title">
+            <div class="card-icon" style="background:rgba(255,165,0,.15);color:#ffa500">&#x1F305;</div>
+            KRX 오프닝 스캐너
+          </div>
+          <div style="display:flex;align-items:center;gap:8px">
+            <span style="font-size:12px;color:var(--text-muted)">활성화</span>
+            <button class="bot-toggle" id="koEnabledToggle" aria-pressed="false" style="width:100px">
+              <span class="bot-toggle-knob"></span>
+              <span class="bot-toggle-label">OFF</span>
+            </button>
+          </div>
+        </div>
+        <div style="padding:16px 20px">
+        <div class="config-bar" style="grid-template-columns:1fr 1fr 1fr;margin-bottom:8px">
+          <div class="config-field">
+            <label>모드</label>
+            <select class="select" id="koMode"><option value="PAPER" selected>PAPER</option><option value="LIVE">LIVE</option></select>
+          </div>
+          <div class="config-field">
+            <label>주문 방식</label>
+            <select class="select" id="koOrderMode"><option value="PCT" selected>PCT (%)</option><option value="FIXED">FIXED (KRW)</option></select>
+          </div>
+          <div class="config-field">
+            <label>주문 값</label>
+            <input class="input" type="number" id="koOrderValue" value="30" step="1"/>
+          </div>
+        </div>
+        <div style="font-size:11px;color:var(--text-muted);margin-bottom:16px">
+          글로벌 자본금 공유 <span id="koGlobalCapDisplay" style="color:var(--primary)"></span>
+        </div>
+        <div style="font-size:12px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">타이밍 (KST)</div>
+        <div class="config-bar" style="grid-template-columns:1fr 1fr 1fr 1fr 1fr;margin-bottom:16px">
+          <div class="config-field">
+            <label>레인지 시작</label>
+            <input class="input" type="text" id="koRangeStart" value="08:00" placeholder="HH:MM"/>
+          </div>
+          <div class="config-field">
+            <label>레인지 종료</label>
+            <input class="input" type="text" id="koRangeEnd" value="08:59" placeholder="HH:MM"/>
+          </div>
+          <div class="config-field">
+            <label>진입 시작</label>
+            <input class="input" type="text" id="koEntryStart" value="09:05" placeholder="HH:MM"/>
+          </div>
+          <div class="config-field">
+            <label>진입 종료</label>
+            <input class="input" type="text" id="koEntryEnd" value="10:30" placeholder="HH:MM"/>
+          </div>
+          <div class="config-field">
+            <label>세션 종료</label>
+            <input class="input" type="text" id="koSessionEnd" value="12:00" placeholder="HH:MM"/>
+          </div>
+        </div>
+        <div style="font-size:12px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">리스크</div>
+        <div class="config-bar" style="grid-template-columns:1fr 1fr 1fr 1fr 1fr;margin-bottom:16px">
+          <div class="config-field">
+            <label>TP (ATR x)</label>
+            <input class="input" type="number" id="koTpAtr" value="1.2" step="0.1"/>
+          </div>
+          <div class="config-field">
+            <label>SL (%)</label>
+            <input class="input" type="number" id="koSlPct" value="10" step="0.5"/>
+          </div>
+          <div class="config-field">
+            <label>Trail (ATR x)</label>
+            <input class="input" type="number" id="koTrailAtr" value="0.8" step="0.1"/>
+          </div>
+          <div class="config-field">
+            <label>미돌파 청산</label>
+            <select class="select" id="koOpenFailed"><option value="true" selected>ON</option><option value="false">OFF</option></select>
+          </div>
+          <div class="config-field">
+            <label>캔들 간격</label>
+            <select class="select" id="koCandleUnit">
+              <option value="1">1min</option><option value="3">3min</option><option value="5" selected>5min</option><option value="10">10min</option><option value="15">15min</option>
+            </select>
+          </div>
+        </div>
+        <div style="font-size:12px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">스캔 &amp; 필터</div>
+        <div class="config-bar" style="grid-template-columns:1fr 1fr 1fr 1fr 1fr;margin-bottom:16px">
+          <div class="config-field">
+            <label>상위 N개</label>
+            <input class="input" type="number" id="koTopN" value="15" min="1" max="50"/>
+          </div>
+          <div class="config-field">
+            <label>최대 포지션</label>
+            <input class="input" type="number" id="koMaxPos" value="3" min="1" max="15"/>
+          </div>
+          <div class="config-field">
+            <label>KOSPI Filter</label>
+            <select class="select" id="koBtcFilter"><option value="true" selected>ON</option><option value="false">OFF</option></select>
+          </div>
+          <div class="config-field">
+            <label>거래량 배수</label>
+            <input class="input" type="number" id="koVolMult" value="1.5" step="0.1"/>
+          </div>
+          <div class="config-field">
+            <label>최소 몸통 %</label>
+            <input class="input" type="number" id="koBodyRatio" value="0.40" step="0.05" min="0" max="1"/>
+          </div>
+          <div class="config-field">
+            <label>최소 가격(원)</label>
+            <input class="input" type="number" id="koMinPrice" value="20" step="1" min="0"/>
+          </div>
+        </div>
+        <div style="font-size:12px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">제외 종목</div>
+        <div style="margin-bottom:8px">
+          <div class="config-field">
+            <label>제외 종목</label>
+            <input class="input" type="text" id="koExcludeMarkets" value="" placeholder="005930,035720" style="width:100%"/>
+          </div>
+        </div>
+      </div>
+    </div>
+    </div>
+
+    <!-- Tab: KRX 올데이 -->
+    <div class="settings-tab-content" id="settingsTabKrxAllday" style="display:none">
+      <div class="card" style="margin-bottom:24px;padding:0;overflow:hidden">
+        <div class="card-header" style="display:flex;align-items:center;justify-content:space-between">
+          <div class="card-title">
+            <div class="card-icon" style="background:rgba(32,201,151,.15);color:#20c997">&#x2600;</div>
+            KRX 올데이 스캐너
+          </div>
+          <div style="display:flex;align-items:center;gap:8px">
+            <span style="font-size:12px;color:var(--text-muted)">활성화</span>
+            <button class="bot-toggle" id="kaEnabledToggle" aria-pressed="false" style="width:100px">
+              <span class="bot-toggle-knob"></span>
+              <span class="bot-toggle-label">OFF</span>
+            </button>
+          </div>
+        </div>
+        <div style="padding:16px 20px">
+        <div class="config-bar" style="grid-template-columns:1fr 1fr 1fr;margin-bottom:8px">
+          <div class="config-field">
+            <label>모드</label>
+            <select class="select" id="kaMode"><option value="PAPER" selected>PAPER</option><option value="LIVE">LIVE</option></select>
+          </div>
+          <div class="config-field">
+            <label>주문 방식</label>
+            <select class="select" id="kaOrderMode"><option value="PCT" selected>PCT (%)</option><option value="FIXED">FIXED (KRW)</option></select>
+          </div>
+          <div class="config-field">
+            <label>주문 값</label>
+            <input class="input" type="number" id="kaOrderValue" value="20" step="1"/>
+          </div>
+        </div>
+        <div style="font-size:11px;color:var(--text-muted);margin-bottom:16px">
+          글로벌 자본금 공유 <span id="kaGlobalCapDisplay" style="color:var(--primary)"></span>
+        </div>
+        <div style="font-size:12px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">타이밍 (KST)</div>
+        <div class="config-bar" style="grid-template-columns:1fr 1fr 1fr;margin-bottom:16px">
+          <div class="config-field">
+            <label>진입 시작</label>
+            <input class="input" type="text" id="kaEntryStart" value="10:35" placeholder="HH:MM"/>
+          </div>
+          <div class="config-field">
+            <label>진입 종료</label>
+            <input class="input" type="text" id="kaEntryEnd" value="14:30" placeholder="HH:MM"/>
+          </div>
+          <div class="config-field">
+            <label>세션 종료</label>
+            <input class="input" type="text" id="kaSessionEnd" value="15:20" placeholder="HH:MM"/>
+          </div>
+        </div>
+        <div style="font-size:12px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">리스크</div>
+        <div class="config-bar" style="grid-template-columns:1fr 1fr 1fr 1fr;margin-bottom:16px">
+          <div class="config-field">
+            <label>SL (%)</label>
+            <input class="input" type="number" id="kaSlPct" value="1.5" step="0.1"/>
+          </div>
+          <div class="config-field">
+            <label>Trail (ATR x)</label>
+            <input class="input" type="number" id="kaTrailAtr" value="0.8" step="0.1"/>
+          </div>
+          <div class="config-field">
+            <label>최소 신뢰도</label>
+            <input class="input" type="number" id="kaMinConf" value="9.4" step="0.1"/>
+          </div>
+          <div class="config-field">
+            <label>캔들 간격</label>
+            <select class="select" id="kaCandleUnit">
+              <option value="1">1min</option><option value="3">3min</option><option value="5" selected>5min</option><option value="10">10min</option><option value="15">15min</option>
+            </select>
+          </div>
+        </div>
+        <div style="font-size:12px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">타임스탑</div>
+        <div class="config-bar" style="grid-template-columns:1fr 1fr;margin-bottom:16px">
+          <div class="config-field">
+            <label>캔들 수</label>
+            <input class="input" type="number" id="kaTsCandles" value="12" min="1"/>
+          </div>
+          <div class="config-field">
+            <label>최소 PnL (%)</label>
+            <input class="input" type="number" id="kaTsMinPnl" value="0.3" step="0.1"/>
+          </div>
+        </div>
+        <div style="font-size:12px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">Quick TP</div>
+        <div class="config-bar" style="grid-template-columns:1fr 1fr 1fr;margin-bottom:16px">
+          <div class="config-field">
+            <label>활성화</label>
+            <select class="select" id="kaQuickTpEnabled"><option value="true" selected>ON</option><option value="false">OFF</option></select>
+          </div>
+          <div class="config-field">
+            <label>목표 (%)</label>
+            <input class="input" type="number" id="kaQuickTpPct" value="0.7" step="0.1" min="0.1" max="10"/>
+          </div>
+          <div class="config-field">
+            <label>체크 간격 (초)</label>
+            <input class="input" type="number" id="kaQuickTpInterval" value="5" min="3" max="60"/>
+          </div>
+        </div>
+        <div style="font-size:12px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">스캔 &amp; 필터</div>
+        <div class="config-bar" style="grid-template-columns:1fr 1fr 1fr 1fr 1fr;margin-bottom:16px">
+          <div class="config-field">
+            <label>상위 N개</label>
+            <input class="input" type="number" id="kaTopN" value="15" min="1" max="50"/>
+          </div>
+          <div class="config-field">
+            <label>최대 포지션</label>
+            <input class="input" type="number" id="kaMaxPos" value="2" min="1" max="15"/>
+          </div>
+          <div class="config-field">
+            <label>KOSPI Filter</label>
+            <select class="select" id="kaBtcFilter"><option value="true" selected>ON</option><option value="false">OFF</option></select>
+          </div>
+          <div class="config-field">
+            <label>거래량 폭증 배수</label>
+            <input class="input" type="number" id="kaVolSurge" value="3.0" step="0.1"/>
+          </div>
+          <div class="config-field">
+            <label>최소 몸통 %</label>
+            <input class="input" type="number" id="kaBodyRatio" value="0.60" step="0.05" min="0" max="1"/>
+          </div>
+          <div class="config-field">
+            <label>최소 가격(원)</label>
+            <input class="input" type="number" id="kaMinPrice" value="20" step="1" min="0"/>
+          </div>
+        </div>
+        <div style="font-size:12px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">제외 종목</div>
+        <div style="margin-bottom:8px">
+          <div class="config-field">
+            <label>제외 종목</label>
+            <input class="input" type="text" id="kaExcludeMarkets" value="" placeholder="005930,035720" style="width:100%"/>
+          </div>
+        </div>
+      </div>
+    </div>
+    </div>
+
+    <!-- Tab: NYSE 오프닝 -->
+    <div class="settings-tab-content" id="settingsTabNyseOpening" style="display:none">
+      <div class="card" style="margin-bottom:24px;padding:0;overflow:hidden">
+        <div class="card-header" style="display:flex;align-items:center;justify-content:space-between">
+          <div class="card-title">
+            <div class="card-icon" style="background:rgba(100,100,255,.15);color:#6464ff">&#x1F319;</div>
+            NYSE 오프닝 스캐너
+          </div>
+          <div style="display:flex;align-items:center;gap:8px">
+            <span style="font-size:12px;color:var(--text-muted)">활성화</span>
+            <button class="bot-toggle" id="noEnabledToggle" aria-pressed="false" style="width:100px">
+              <span class="bot-toggle-knob"></span>
+              <span class="bot-toggle-label">OFF</span>
+            </button>
+          </div>
+        </div>
+        <div style="padding:16px 20px">
+        <div class="config-bar" style="grid-template-columns:1fr 1fr 1fr;margin-bottom:8px">
+          <div class="config-field">
+            <label>모드</label>
+            <select class="select" id="noMode"><option value="PAPER" selected>PAPER</option><option value="LIVE">LIVE</option></select>
+          </div>
+          <div class="config-field">
+            <label>주문 방식</label>
+            <select class="select" id="noOrderMode"><option value="PCT" selected>PCT (%)</option><option value="FIXED">FIXED (USD)</option></select>
+          </div>
+          <div class="config-field">
+            <label>주문 값</label>
+            <input class="input" type="number" id="noOrderValue" value="30" step="1"/>
+          </div>
+        </div>
+        <div style="font-size:11px;color:var(--text-muted);margin-bottom:16px">
+          글로벌 자본금 공유 <span id="noGlobalCapDisplay" style="color:var(--primary)"></span>
+        </div>
+        <div style="font-size:12px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">Timing (ET, DST 자동)</div>
+        <div style="font-size:11px;color:var(--text-muted);margin-bottom:8px">ET 09:30-16:00 = KST 23:30-06:00 (서머타임 시 22:30-05:00)</div>
+        <div class="config-bar" style="grid-template-columns:1fr 1fr 1fr 1fr 1fr;margin-bottom:16px">
+          <div class="config-field">
+            <label>레인지 시작 (ET)</label>
+            <input class="input" type="text" id="noRangeStart" value="09:30" placeholder="HH:MM"/>
+          </div>
+          <div class="config-field">
+            <label>레인지 종료 (ET)</label>
+            <input class="input" type="text" id="noRangeEnd" value="09:59" placeholder="HH:MM"/>
+          </div>
+          <div class="config-field">
+            <label>진입 시작 (ET)</label>
+            <input class="input" type="text" id="noEntryStart" value="10:05" placeholder="HH:MM"/>
+          </div>
+          <div class="config-field">
+            <label>진입 종료 (ET)</label>
+            <input class="input" type="text" id="noEntryEnd" value="11:30" placeholder="HH:MM"/>
+          </div>
+          <div class="config-field">
+            <label>세션 종료 (ET)</label>
+            <input class="input" type="text" id="noSessionEnd" value="13:00" placeholder="HH:MM"/>
+          </div>
+        </div>
+        <div style="font-size:12px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">리스크</div>
+        <div class="config-bar" style="grid-template-columns:1fr 1fr 1fr 1fr 1fr;margin-bottom:16px">
+          <div class="config-field">
+            <label>TP (ATR x)</label>
+            <input class="input" type="number" id="noTpAtr" value="1.2" step="0.1"/>
+          </div>
+          <div class="config-field">
+            <label>SL (%)</label>
+            <input class="input" type="number" id="noSlPct" value="10" step="0.5"/>
+          </div>
+          <div class="config-field">
+            <label>Trail (ATR x)</label>
+            <input class="input" type="number" id="noTrailAtr" value="0.8" step="0.1"/>
+          </div>
+          <div class="config-field">
+            <label>미돌파 청산</label>
+            <select class="select" id="noOpenFailed"><option value="true" selected>ON</option><option value="false">OFF</option></select>
+          </div>
+          <div class="config-field">
+            <label>캔들 간격</label>
+            <select class="select" id="noCandleUnit">
+              <option value="1">1min</option><option value="3">3min</option><option value="5" selected>5min</option><option value="10">10min</option><option value="15">15min</option>
+            </select>
+          </div>
+        </div>
+        <div style="font-size:12px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">스캔 &amp; 필터</div>
+        <div class="config-bar" style="grid-template-columns:1fr 1fr 1fr 1fr 1fr;margin-bottom:16px">
+          <div class="config-field">
+            <label>상위 N개</label>
+            <input class="input" type="number" id="noTopN" value="15" min="1" max="50"/>
+          </div>
+          <div class="config-field">
+            <label>최대 포지션</label>
+            <input class="input" type="number" id="noMaxPos" value="3" min="1" max="15"/>
+          </div>
+          <div class="config-field">
+            <label>SPY 필터</label>
+            <select class="select" id="noBtcFilter"><option value="true" selected>ON</option><option value="false">OFF</option></select>
+          </div>
+          <div class="config-field">
+            <label>거래량 배수</label>
+            <input class="input" type="number" id="noVolMult" value="1.5" step="0.1"/>
+          </div>
+          <div class="config-field">
+            <label>최소 몸통 %</label>
+            <input class="input" type="number" id="noBodyRatio" value="0.40" step="0.05" min="0" max="1"/>
+          </div>
+          <div class="config-field">
+            <label>최소 가격 (USD)</label>
+            <input class="input" type="number" id="noMinPrice" value="5" step="1" min="0"/>
+          </div>
+        </div>
+        <div style="font-size:12px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">제외 종목</div>
+        <div style="margin-bottom:8px">
+          <div class="config-field">
+            <label>제외 종목</label>
+            <input class="input" type="text" id="noExcludeMarkets" value="" placeholder="AAPL,TSLA" style="width:100%"/>
+          </div>
+        </div>
+      </div>
+    </div>
+    </div>
+
+    <!-- Tab: NYSE 올데이 -->
+    <div class="settings-tab-content" id="settingsTabNyseAllday" style="display:none">
+      <div class="card" style="margin-bottom:24px;padding:0;overflow:hidden">
+        <div class="card-header" style="display:flex;align-items:center;justify-content:space-between">
+          <div class="card-title">
+            <div class="card-icon" style="background:rgba(168,85,247,.15);color:#a855f7">&#x1F30D;</div>
+            NYSE 올데이 스캐너
+          </div>
+          <div style="display:flex;align-items:center;gap:8px">
+            <span style="font-size:12px;color:var(--text-muted)">활성화</span>
+            <button class="bot-toggle" id="naEnabledToggle" aria-pressed="false" style="width:100px">
+              <span class="bot-toggle-knob"></span>
+              <span class="bot-toggle-label">OFF</span>
+            </button>
+          </div>
+        </div>
+        <div style="padding:16px 20px">
+        <div class="config-bar" style="grid-template-columns:1fr 1fr 1fr;margin-bottom:8px">
+          <div class="config-field">
+            <label>모드</label>
+            <select class="select" id="naMode"><option value="PAPER" selected>PAPER</option><option value="LIVE">LIVE</option></select>
+          </div>
+          <div class="config-field">
+            <label>주문 방식</label>
+            <select class="select" id="naOrderMode"><option value="PCT" selected>PCT (%)</option><option value="FIXED">FIXED (USD)</option></select>
+          </div>
+          <div class="config-field">
+            <label>주문 값</label>
+            <input class="input" type="number" id="naOrderValue" value="20" step="1"/>
+          </div>
+        </div>
+        <div style="font-size:11px;color:var(--text-muted);margin-bottom:16px">
+          글로벌 자본금 공유 <span id="naGlobalCapDisplay" style="color:var(--primary)"></span>
+        </div>
+        <div style="font-size:12px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">Timing (ET, DST 자동)</div>
+        <div style="font-size:11px;color:var(--text-muted);margin-bottom:8px">ET 09:30-16:00 = KST 23:30-06:00 (서머타임 시 22:30-05:00)</div>
+        <div class="config-bar" style="grid-template-columns:1fr 1fr 1fr;margin-bottom:16px">
+          <div class="config-field">
+            <label>진입 시작 (ET)</label>
+            <input class="input" type="text" id="naEntryStart" value="10:35" placeholder="HH:MM"/>
+          </div>
+          <div class="config-field">
+            <label>진입 종료 (ET)</label>
+            <input class="input" type="text" id="naEntryEnd" value="15:00" placeholder="HH:MM"/>
+          </div>
+          <div class="config-field">
+            <label>세션 종료 (ET)</label>
+            <input class="input" type="text" id="naSessionEnd" value="15:50" placeholder="HH:MM"/>
+          </div>
+        </div>
+        <div style="font-size:12px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">리스크</div>
+        <div class="config-bar" style="grid-template-columns:1fr 1fr 1fr 1fr;margin-bottom:16px">
+          <div class="config-field">
+            <label>SL (%)</label>
+            <input class="input" type="number" id="naSlPct" value="1.5" step="0.1"/>
+          </div>
+          <div class="config-field">
+            <label>Trail (ATR x)</label>
+            <input class="input" type="number" id="naTrailAtr" value="0.8" step="0.1"/>
+          </div>
+          <div class="config-field">
+            <label>최소 신뢰도</label>
+            <input class="input" type="number" id="naMinConf" value="9.4" step="0.1"/>
+          </div>
+          <div class="config-field">
+            <label>캔들 간격</label>
+            <select class="select" id="naCandleUnit">
+              <option value="1">1min</option><option value="3">3min</option><option value="5" selected>5min</option><option value="10">10min</option><option value="15">15min</option>
+            </select>
+          </div>
+        </div>
+        <div style="font-size:12px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">타임스탑</div>
+        <div class="config-bar" style="grid-template-columns:1fr 1fr;margin-bottom:16px">
+          <div class="config-field">
+            <label>캔들 수</label>
+            <input class="input" type="number" id="naTsCandles" value="12" min="1"/>
+          </div>
+          <div class="config-field">
+            <label>최소 PnL (%)</label>
+            <input class="input" type="number" id="naTsMinPnl" value="0.3" step="0.1"/>
+          </div>
+        </div>
+        <div style="font-size:12px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">Quick TP</div>
+        <div class="config-bar" style="grid-template-columns:1fr 1fr 1fr;margin-bottom:16px">
+          <div class="config-field">
+            <label>활성화</label>
+            <select class="select" id="naQuickTpEnabled"><option value="true" selected>ON</option><option value="false">OFF</option></select>
+          </div>
+          <div class="config-field">
+            <label>목표 (%)</label>
+            <input class="input" type="number" id="naQuickTpPct" value="0.7" step="0.1" min="0.1" max="10"/>
+          </div>
+          <div class="config-field">
+            <label>체크 간격 (초)</label>
+            <input class="input" type="number" id="naQuickTpInterval" value="5" min="3" max="60"/>
+          </div>
+        </div>
+        <div style="font-size:12px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">스캔 &amp; 필터</div>
+        <div class="config-bar" style="grid-template-columns:1fr 1fr 1fr 1fr 1fr;margin-bottom:16px">
+          <div class="config-field">
+            <label>상위 N개</label>
+            <input class="input" type="number" id="naTopN" value="15" min="1" max="50"/>
+          </div>
+          <div class="config-field">
+            <label>최대 포지션</label>
+            <input class="input" type="number" id="naMaxPos" value="2" min="1" max="15"/>
+          </div>
+          <div class="config-field">
+            <label>SPY 필터</label>
+            <select class="select" id="naBtcFilter"><option value="true" selected>ON</option><option value="false">OFF</option></select>
+          </div>
+          <div class="config-field">
+            <label>거래량 폭증 배수</label>
+            <input class="input" type="number" id="naVolSurge" value="3.0" step="0.1"/>
+          </div>
+          <div class="config-field">
+            <label>최소 몸통 %</label>
+            <input class="input" type="number" id="naBodyRatio" value="0.60" step="0.05" min="0" max="1"/>
+          </div>
+          <div class="config-field">
+            <label>최소 가격 (USD)</label>
+            <input class="input" type="number" id="naMinPrice" value="5" step="1" min="0"/>
+          </div>
+        </div>
+        <div style="font-size:12px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">제외 종목</div>
+        <div style="margin-bottom:8px">
+          <div class="config-field">
+            <label>제외 종목</label>
+            <input class="input" type="text" id="naExcludeMarkets" value="" placeholder="AAPL,TSLA" style="width:100%"/>
+          </div>
+        </div>
+      </div>
+    </div>
+    </div>
+
+    <!-- Tab: KRX 모닝 러쉬 -->
+    <div class="settings-tab-content" id="settingsTabKrxMorningRush" style="display:none">
+      <div class="card" style="margin-bottom:24px;padding:0;overflow:hidden">
+        <div class="card-header" style="display:flex;align-items:center;justify-content:space-between">
+          <div class="card-title">
+            <div class="card-icon" style="background:rgba(255,87,34,.15);color:#ff5722">&#x1F680;</div>
+            KRX 모닝 러쉬 스캐너
+          </div>
+          <div style="display:flex;align-items:center;gap:8px">
+            <span style="font-size:12px;color:var(--text-muted)">활성화</span>
+            <button class="bot-toggle" id="kmrEnabledToggle" aria-pressed="false" style="width:100px">
+              <span class="bot-toggle-knob"></span>
+              <span class="bot-toggle-label">OFF</span>
+            </button>
+          </div>
+        </div>
+        <div style="padding:16px 20px">
+        <div class="config-bar" style="grid-template-columns:1fr 1fr 1fr;margin-bottom:8px">
+          <div class="config-field">
+            <label>모드</label>
+            <select class="select" id="kmrMode"><option value="PAPER" selected>PAPER</option><option value="LIVE">LIVE</option></select>
+          </div>
+          <div class="config-field">
+            <label>주문 방식</label>
+            <select class="select" id="kmrOrderMode"><option value="PCT" selected>PCT (%)</option><option value="FIXED">FIXED (KRW)</option></select>
+          </div>
+          <div class="config-field">
+            <label>주문 값</label>
+            <input class="input" type="number" id="kmrOrderValue" value="30" step="1"/>
+          </div>
+        </div>
+        <div style="font-size:11px;color:var(--text-muted);margin-bottom:16px">
+          글로벌 자본금 공유 <span id="kmrGlobalCapDisplay" style="color:var(--primary)"></span>
+        </div>
+        <div style="font-size:12px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">갭 &amp; 거래량 필터</div>
+        <div class="config-bar" style="grid-template-columns:1fr 1fr 1fr;margin-bottom:16px">
+          <div class="config-field">
+            <label>갭 기준 (%)</label>
+            <input class="input" type="number" id="kmrGapThreshold" value="2.5" step="0.1"/>
+          </div>
+          <div class="config-field">
+            <label>거래량 배수</label>
+            <input class="input" type="number" id="kmrVolMult" value="3.0" step="0.1"/>
+          </div>
+          <div class="config-field">
+            <label>확인 횟수</label>
+            <input class="input" type="number" id="kmrConfirmCount" value="2" min="1" max="10"/>
+          </div>
+        </div>
+        <div style="font-size:12px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">타이밍</div>
+        <div class="config-bar" style="grid-template-columns:1fr 1fr;margin-bottom:16px">
+          <div class="config-field">
+            <label>체크 간격 (초)</label>
+            <input class="input" type="number" id="kmrCheckInterval" value="5" min="1" max="60"/>
+          </div>
+          <div class="config-field">
+            <label>진입 지연 (초)</label>
+            <input class="input" type="number" id="kmrEntryDelay" value="30" min="0" max="300"/>
+          </div>
+        </div>
+        <div style="font-size:12px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">리스크</div>
+        <div class="config-bar" style="grid-template-columns:1fr 1fr 1fr 1fr;margin-bottom:16px">
+          <div class="config-field">
+            <label>TP (%)</label>
+            <input class="input" type="number" id="kmrTpPct" value="1.5" step="0.1"/>
+          </div>
+          <div class="config-field">
+            <label>SL (%)</label>
+            <input class="input" type="number" id="kmrSlPct" value="1.5" step="0.1"/>
+          </div>
+          <div class="config-field">
+            <label>세션 종료 (KST)</label>
+            <input class="input" type="text" id="kmrSessionEnd" value="10:00" placeholder="HH:MM"/>
+          </div>
+          <div class="config-field">
+            <label>타임스탑 (분)</label>
+            <input class="input" type="number" id="kmrTimeStopMin" value="30" min="1"/>
+          </div>
+        </div>
+        <div style="font-size:12px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">스캔 &amp; 필터</div>
+        <div class="config-bar" style="grid-template-columns:1fr 1fr 1fr 1fr;margin-bottom:16px">
+          <div class="config-field">
+            <label>TOP N</label>
+            <input class="input" type="number" id="kmrTopN" value="20" min="1" max="100"/>
+          </div>
+          <div class="config-field">
+            <label>최소 거래대금 (억)</label>
+            <input class="input" type="number" id="kmrMinVolKrw" value="10" step="1" min="0"/>
+          </div>
+          <div class="config-field">
+            <label>최소 가격 (원)</label>
+            <input class="input" type="number" id="kmrMinPrice" value="1000" step="100" min="0"/>
+          </div>
+          <div class="config-field">
+            <label>최대 포지션</label>
+            <input class="input" type="number" id="kmrMaxPos" value="3" min="1" max="15"/>
+          </div>
+        </div>
+        <div style="font-size:12px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">제외 종목</div>
+        <div style="margin-bottom:8px">
+          <div class="config-field">
+            <label>제외 종목</label>
+            <input class="input" type="text" id="kmrExcludeMarkets" value="" placeholder="005930,035720" style="width:100%"/>
+          </div>
+        </div>
+      </div>
+    </div>
+    </div>
+
+    <!-- Tab: NYSE 모닝 러쉬 -->
+    <div class="settings-tab-content" id="settingsTabNyseMorningRush" style="display:none">
+      <div class="card" style="margin-bottom:24px;padding:0;overflow:hidden">
+        <div class="card-header" style="display:flex;align-items:center;justify-content:space-between">
+          <div class="card-title">
+            <div class="card-icon" style="background:rgba(255,87,34,.15);color:#ff5722">&#x1F680;</div>
+            NYSE 모닝 러쉬 스캐너
+          </div>
+          <div style="display:flex;align-items:center;gap:8px">
+            <span style="font-size:12px;color:var(--text-muted)">활성화</span>
+            <button class="bot-toggle" id="nmrEnabledToggle" aria-pressed="false" style="width:100px">
+              <span class="bot-toggle-knob"></span>
+              <span class="bot-toggle-label">OFF</span>
+            </button>
+          </div>
+        </div>
+        <div style="padding:16px 20px">
+        <div class="config-bar" style="grid-template-columns:1fr 1fr 1fr;margin-bottom:8px">
+          <div class="config-field">
+            <label>모드</label>
+            <select class="select" id="nmrMode"><option value="PAPER" selected>PAPER</option><option value="LIVE">LIVE</option></select>
+          </div>
+          <div class="config-field">
+            <label>주문 방식</label>
+            <select class="select" id="nmrOrderMode"><option value="PCT" selected>PCT (%)</option><option value="FIXED">FIXED (USD)</option></select>
+          </div>
+          <div class="config-field">
+            <label>주문 값</label>
+            <input class="input" type="number" id="nmrOrderValue" value="30" step="1"/>
+          </div>
+        </div>
+        <div style="font-size:11px;color:var(--text-muted);margin-bottom:16px">
+          글로벌 자본금 공유 <span id="nmrGlobalCapDisplay" style="color:var(--primary)"></span>
+        </div>
+        <div style="font-size:12px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">갭 &amp; PM 고점 필터</div>
+        <div class="config-bar" style="grid-template-columns:1fr 1fr 1fr;margin-bottom:16px">
+          <div class="config-field">
+            <label>갭 기준 (%)</label>
+            <input class="input" type="number" id="nmrGapThreshold" value="4.0" step="0.1"/>
+          </div>
+          <div class="config-field">
+            <label>PM 고점 돌파 (%)</label>
+            <input class="input" type="number" id="nmrPmHighBreak" value="2.0" step="0.1"/>
+          </div>
+          <div class="config-field">
+            <label>거래량 배수</label>
+            <input class="input" type="number" id="nmrVolMult" value="2.0" step="0.1"/>
+          </div>
+        </div>
+        <div style="font-size:12px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">타이밍</div>
+        <div class="config-bar" style="grid-template-columns:1fr 1fr;margin-bottom:16px">
+          <div class="config-field">
+            <label>체크 간격 (초)</label>
+            <input class="input" type="number" id="nmrCheckInterval" value="5" min="1" max="60"/>
+          </div>
+          <div class="config-field">
+            <label>진입 지연 (초)</label>
+            <input class="input" type="number" id="nmrEntryDelay" value="30" min="0" max="300"/>
+          </div>
+        </div>
+        <div style="font-size:12px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">리스크</div>
+        <div class="config-bar" style="grid-template-columns:1fr 1fr 1fr 1fr;margin-bottom:16px">
+          <div class="config-field">
+            <label>TP (%)</label>
+            <input class="input" type="number" id="nmrTpPct" value="3.0" step="0.1"/>
+          </div>
+          <div class="config-field">
+            <label>SL (%)</label>
+            <input class="input" type="number" id="nmrSlPct" value="2.0" step="0.1"/>
+          </div>
+          <div class="config-field">
+            <label>세션 종료 (ET)</label>
+            <input class="input" type="text" id="nmrSessionEnd" value="10:30" placeholder="HH:MM"/>
+          </div>
+          <div class="config-field">
+            <label>타임스탑 (분)</label>
+            <input class="input" type="number" id="nmrTimeStopMin" value="20" min="1"/>
+          </div>
+        </div>
+        <div style="font-size:12px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">스캔 &amp; 필터</div>
+        <div class="config-bar" style="grid-template-columns:1fr 1fr 1fr 1fr;margin-bottom:16px">
+          <div class="config-field">
+            <label>TOP N</label>
+            <input class="input" type="number" id="nmrTopN" value="20" min="1" max="100"/>
+          </div>
+          <div class="config-field">
+            <label>최소 거래대금 (억)</label>
+            <input class="input" type="number" id="nmrMinVolUsd" value="10" step="1" min="0"/>
+          </div>
+          <div class="config-field">
+            <label>최소 가격 (USD)</label>
+            <input class="input" type="number" id="nmrMinPrice" value="5" step="1" min="0"/>
+          </div>
+          <div class="config-field">
+            <label>최대 포지션</label>
+            <input class="input" type="number" id="nmrMaxPos" value="3" min="1" max="15"/>
+          </div>
+        </div>
+        <div style="font-size:12px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">제외 종목</div>
+        <div style="margin-bottom:8px">
+          <div class="config-field">
+            <label>제외 종목</label>
+            <input class="input" type="text" id="nmrExcludeMarkets" value="" placeholder="AAPL,TSLA" style="width:100%"/>
+          </div>
+        </div>
+      </div>
+    </div>
+    </div>
+
+    <!-- ── Apply Button ── -->
+    <div class="run-section" style="margin-top:32px;margin-bottom:0">
+      <button class="run-btn" id="applyBtn">
+        <span class="run-icon">&#x2714;</span>
+        설정 저장
+      </button>
+    </div>
+
+  </div>
+</main>
+
+<!-- Strategy descriptions modal (? icon) -->
+<div class="modal" id="strategyModal" aria-hidden="true">
+  <div class="modal-backdrop" data-modal-close></div>
+  <div class="modal-dialog" role="dialog" aria-modal="true" aria-labelledby="strategyModalTitle">
+    <div class="modal-header">
+      <div class="modal-title" id="strategyModalTitle">전략 설명</div>
+      <button type="button" class="modal-close" aria-label="Close" data-modal-close>&times;</button>
+    </div>
+    <div class="modal-body" id="strategyModalBody"></div>
+  </div>
+</div>
+
+<!-- Strategy detail settings modal (gear icon) -->
+<div class="modal" id="stratDetailModal" aria-hidden="true">
+  <div class="modal-backdrop" data-modal-close></div>
+  <div class="modal-dialog" role="dialog" aria-modal="true" aria-labelledby="stratDetailTitle" style="max-width:600px">
+    <div class="modal-header">
+      <div class="modal-title" id="stratDetailTitle">&#x2699; 전략 상세 설정</div>
+      <button type="button" class="modal-close" aria-label="Close" data-modal-close>&times;</button>
+    </div>
+    <div class="modal-body" id="stratDetailBody"></div>
+    <div style="padding:12px 20px 16px;text-align:right;border-top:1px solid var(--card-border)">
+      <button class="btn primary" id="sdSaveBtn" style="font-size:13px;padding:8px 24px">저장</button>
+    </div>
+  </div>
+</div>
+
+<!-- Build Info Footer -->
+<footer class="build-footer" id="buildFooter"></footer>
+
+<!-- Mobile Bottom Nav -->
+<nav class="mobile-nav">
+  <a class="mobile-nav-item" th:href="@{/dashboard}"><span class="mnav-icon">&#x1F4CA;</span>대시보드</a>
+  <a class="mobile-nav-item active" th:href="@{/settings}"><span class="mnav-icon">&#x2699;&#xFE0F;</span>설정</a>
+  <a class="mobile-nav-item" th:href="@{/backtest}"><span class="mnav-icon">&#x1F9EA;</span>백테스트</a>
+</nav>
+
+<script th:src="@{/js/autotrade-common.js(v=20260330a)}"></script>
+<script th:src="@{/js/settings.js(v=20260330a)}"></script>
+</body>
+</html>

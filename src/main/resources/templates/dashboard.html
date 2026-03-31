@@ -1,0 +1,689 @@
+<!doctype html>
+<html lang="ko" xmlns:th="http://www.thymeleaf.org">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover"/>
+  <title>Stocks AutoTrade - Dashboard</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0%25' stop-color='%232b76ff'/%3E%3Cstop offset='100%25' stop-color='%2320c997'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='32' height='32' rx='6' fill='url(%23g)'/%3E%3Cpath d='M8 22 L14 12 L18 17 L24 8' stroke='white' stroke-width='2.5' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3Ccircle cx='24' cy='8' r='2.5' fill='white'/%3E%3C/svg%3E"/>
+  <link rel="stylesheet" th:href="@{/css/autotrade.css(v=20260330a)}">
+</head>
+<body>
+<!-- Toast container -->
+<div class="toast-container" id="toastContainer"></div>
+
+<!-- Fixed Header -->
+<header class="header">
+  <div class="header-left">
+    <a href="#" class="logo" th:href="@{/dashboard}">
+      <div class="logo-icon">
+        <svg width="16" height="16" viewBox="0 0 32 32">
+          <defs><linearGradient id="hg" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#2b76ff"/><stop offset="100%" stop-color="#20c997"/></linearGradient></defs>
+          <path d="M8 22 L14 12 L18 17 L24 8" stroke="white" stroke-width="2.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+          <circle cx="24" cy="8" r="2.5" fill="white"/>
+        </svg>
+      </div>
+      <span>Stocks AutoTrade</span>
+    </a>
+    <nav class="nav-tabs">
+      <a class="nav-tab active" th:href="@{/dashboard}">&#x1F4CA; 대시보드</a>
+      <a class="nav-tab" th:href="@{/settings}">&#x2699;&#xFE0F; 설정</a>
+      <a class="nav-tab" th:href="@{/backtest}">&#x1F9EA; 백테스트</a>
+    </nav>
+  </div>
+  <div class="header-right">
+    <button class="header-btn" id="ssoPartnerBtn" title="SSO" style="display:none;font-size:16px">&#x1F504;</button>
+    <button class="header-btn" id="refreshBtn" title="새로고침">&#x21bb;</button>
+    <button class="header-btn" id="themeToggle" title="테마">&#x263e;</button>
+    <button class="header-btn" id="logoutBtn" title="로그아웃" style="color:var(--danger)">&#x23fb;</button>
+  </div>
+</header>
+
+<main class="main">
+
+  <!-- Bot Status Bar -->
+  <div class="status-bar">
+    <div class="status-left">
+      <div class="status-indicator">
+        <span class="status-dot stopped" id="statusDot"></span>
+        <span id="botStateText">STOPPED</span>
+      </div>
+      <div class="status-meta">
+        <span class="status-meta-item" id="statusMetaTarget" style="display:none">
+          <span class="status-meta-label">Target</span>
+          <span id="statusBarMode">-</span>
+        </span>
+        <span class="status-meta-item" id="statusMetaKrxOpening">
+          <span class="status-meta-label">KRX Opening</span>
+          <span id="statusKoState" style="font-size:11px">-</span>
+        </span>
+        <span class="status-meta-item" id="statusMetaKrxAllday">
+          <span class="status-meta-label">KRX AllDay</span>
+          <span id="statusKaState" style="font-size:11px">-</span>
+        </span>
+        <span class="status-meta-item" id="statusMetaNyseOpening">
+          <span class="status-meta-label">NYSE Opening</span>
+          <span id="statusNoState" style="font-size:11px">-</span>
+        </span>
+        <span class="status-meta-item" id="statusMetaNyseAllday">
+          <span class="status-meta-label">NYSE AllDay</span>
+          <span id="statusNaState" style="font-size:11px">-</span>
+        </span>
+        <span class="status-meta-item" id="statusMetaKrxMR">
+          <span class="status-meta-label">KRX M.Rush</span>
+          <span id="statusKmrState" style="font-size:11px">-</span>
+        </span>
+        <span class="status-meta-item" id="statusMetaNyseMR">
+          <span class="status-meta-label">NYSE M.Rush</span>
+          <span id="statusNmrState" style="font-size:11px">-</span>
+        </span>
+        <span class="status-meta-item">
+          <span class="status-meta-label">Groups</span>
+          <span id="statusStrategy"><span class="skeleton skeleton-text" style="width:60px"></span></span>
+        </span>
+      </div>
+    </div>
+    <div class="status-right" style="display:flex;align-items:center;gap:12px">
+      <label style="display:flex;align-items:center;gap:6px;font-size:11px;color:var(--text-muted);cursor:pointer;white-space:nowrap" title="ON 시 서버 재시작 후 봇/스캐너 자동 시작">
+        <input type="checkbox" id="autoStartToggle" style="width:15px;height:15px;accent-color:var(--primary);cursor:pointer">
+        <span>Auto Start</span>
+      </label>
+      <button class="bot-toggle" id="botSwitch" aria-pressed="false" title="봇 시작/중지" style="width:120px;flex-shrink:0">
+        <span class="bot-toggle-knob"></span>
+        <span class="bot-toggle-label">OFF</span>
+      </button>
+    </div>
+  </div>
+
+  <!-- KPI Row -->
+  <div class="kpi-row">
+    <div class="kpi-card profit">
+      <div class="kpi-label">총 손익 (KRW) <span class="help-icon" data-tooltip="실현 손익 합계(원화)입니다.&#10;실현 기준: 매도(청산)로 확정된 손익만 합산" aria-label="총 손익 도움말"></span></div>
+      <div class="kpi-value" id="totalPnl"><span class="skeleton skeleton-value"></span></div>
+    </div>
+    <div class="kpi-card accent">
+      <div class="kpi-label">수익률 <span class="help-icon" data-tooltip="수익률(%)입니다." aria-label="수익률 도움말"></span></div>
+      <div class="kpi-value" id="roi"><span class="skeleton skeleton-value" style="width:60%"></span></div>
+      <div class="kpi-sub">
+        <span>승률</span>
+        <span style="font-weight:700;font-family:var(--font-mono)" id="winRate"><span class="skeleton skeleton-text" style="width:40%"></span></span>
+      </div>
+    </div>
+    <div class="kpi-card neutral">
+      <div style="display:flex;align-items:center;justify-content:space-between">
+        <div class="kpi-label" style="margin-bottom:0">잔고 <span class="help-icon" data-tooltip="현재 보유 자산 요약" aria-label="잔고 도움말"></span></div>
+        <button class="header-btn" id="balanceRefreshBtn" style="width:28px;height:28px;font-size:14px" title="잔고 새로고침">&#x21bb;</button>
+      </div>
+      <div style="margin-top:8px">
+        <div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px">가용 잔고</div>
+        <div class="kpi-value" style="font-size:20px" id="balanceAvailableKrw"><span class="skeleton skeleton-value" style="width:70%"></span></div>
+        <div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px;margin-top:4px">투자 중</div>
+        <div style="font-weight:700;font-family:var(--font-mono)" id="balanceLockedKrw"><span class="skeleton skeleton-text" style="width:50%"></span></div>
+        <div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px;margin-top:4px">기준시각</div>
+        <div style="font-weight:700;font-family:var(--font-mono);font-size:12px" id="balanceAsOf"><span class="skeleton skeleton-text" style="width:65%"></span></div>
+      </div>
+    </div>
+    <div class="kpi-card neutral">
+      <div class="kpi-label">Active Scanners <span class="help-icon" data-tooltip="현재 활성화된 스캐너와 모드" aria-label="Scanners help"></span></div>
+      <div style="margin-top:4px">
+        <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">
+          <span style="font-size:12px">&#x1F305;</span>
+          <span style="font-size:11px;color:var(--text-muted);width:75px">KRX Open</span>
+          <span style="font-weight:700;font-family:var(--font-mono);font-size:13px" id="modeSnapKo">-</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">
+          <span style="font-size:12px">&#x2600;</span>
+          <span style="font-size:11px;color:var(--text-muted);width:75px">KRX AllDay</span>
+          <span style="font-weight:700;font-family:var(--font-mono);font-size:13px" id="modeSnapKa">-</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">
+          <span style="font-size:12px">&#x1F319;</span>
+          <span style="font-size:11px;color:var(--text-muted);width:75px">NYSE Open</span>
+          <span style="font-weight:700;font-family:var(--font-mono);font-size:13px" id="modeSnapNo">-</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">
+          <span style="font-size:12px">&#x1F30D;</span>
+          <span style="font-size:11px;color:var(--text-muted);width:75px">NYSE AllDay</span>
+          <span style="font-weight:700;font-family:var(--font-mono);font-size:13px" id="modeSnapNa">-</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">
+          <span style="font-size:12px">&#x1F680;</span>
+          <span style="font-size:11px;color:var(--text-muted);width:75px">KRX M.Rush</span>
+          <span style="font-weight:700;font-family:var(--font-mono);font-size:13px" id="modeSnapKmr">-</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:6px">
+          <span style="font-size:12px">&#x1F680;</span>
+          <span style="font-size:11px;color:var(--text-muted);width:75px">NYSE M.Rush</span>
+          <span style="font-weight:700;font-family:var(--font-mono);font-size:13px" id="modeSnapNmr">-</span>
+        </div>
+      </div>
+    </div>
+    <div class="kpi-card capital">
+      <div class="kpi-label">자본금 <span class="help-icon" data-tooltip="설정 자본금 대비 포지션 투입 현황&#10;투입: 포지션에 투입된 금액&#10;잔여: 잔여 배분 가능 금액" aria-label="자본금 도움말"></span></div>
+      <div style="margin-top:4px">
+        <div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px">총 자본금</div>
+        <div style="font-weight:800;font-family:var(--font-mono);font-size:20px" id="capitalSnap"><span class="skeleton skeleton-text" style="width:60%"></span></div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px">
+          <div>
+            <div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px">투입</div>
+            <div style="font-weight:700;font-family:var(--font-mono);font-size:14px" id="capitalUsed"><span class="skeleton skeleton-text" style="width:70%"></span></div>
+          </div>
+          <div>
+            <div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px">잔여</div>
+            <div style="font-weight:700;font-family:var(--font-mono);font-size:14px" id="capitalAvailable"><span class="skeleton skeleton-text" style="width:70%"></span></div>
+          </div>
+        </div>
+        <div class="capital-progress-wrap">
+          <div class="capital-progress-bar">
+            <div class="capital-progress-fill" id="capitalProgressFill" style="width:0%"></div>
+          </div>
+          <div class="capital-progress-label">
+            <span>사용률</span>
+            <span class="capital-progress-pct" id="capitalUsagePct">-</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Portfolio Performance + Strategy Performance -->
+  <div class="content-grid" id="contentGrid">
+    <div class="chart-card">
+      <div class="chart-card-header">
+        <div class="chart-card-title">포트폴리오 성과</div>
+        <div class="chart-period-tabs" id="periodTabs">
+          <button class="period-tab" data-period="1D">1D</button>
+          <button class="period-tab active" data-period="1W">1W</button>
+          <button class="period-tab" data-period="1M">1M</button>
+          <button class="period-tab" data-period="ALL">ALL</button>
+        </div>
+      </div>
+      <div style="position:relative">
+        <span style="position:absolute;top:4px;right:4px;font-size:10px;color:var(--text-muted);opacity:0.6;z-index:1">KRW</span>
+        <div class="chart-placeholder" id="portfolioChartArea"></div>
+        <div style="text-align:center;font-size:10px;color:var(--text-muted);opacity:0.6;margin-top:-4px">시간</div>
+      </div>
+    </div>
+    <div class="strategy-panel">
+      <div class="strategy-panel-title">
+        <span>전략별 성과</span>
+        <span class="count" id="stratPerfCount"></span>
+      </div>
+      <div class="strategy-list" id="strategyList">
+        <div style="color:var(--text-muted);font-size:13px;padding:16px">데이터를 불러오는 중...</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Strategy Groups (타겟 전략) -->
+  <div class="card" id="dashGroupsSection" style="margin-bottom:16px;padding:0;overflow:hidden;display:none">
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:16px 20px">
+      <div style="font-weight:700;font-size:14px;display:flex;align-items:center;gap:8px">
+        <span style="font-size:16px">&#x1F3AF;</span> 타겟 전략
+        <span class="badge" id="groupCountBadge" style="font-size:11px">0</span>
+      </div>
+    </div>
+    <div class="groups-grid" id="dashGroupsGrid" style="padding:0 16px 16px"></div>
+  </div>
+
+  <!-- Market Session Indicators -->
+  <div style="display:flex;gap:16px;margin-bottom:16px">
+    <div class="glass-card" style="flex:1;padding:12px;display:flex;align-items:center;gap:8px">
+      <span id="krxDot" style="width:10px;height:10px;border-radius:50%;background:#dc3545;display:inline-block"></span>
+      <span style="font-weight:600">KRX</span>
+      <span id="krxSessionText" style="color:var(--text-muted)">CLOSED</span>
+    </div>
+    <div class="glass-card" style="flex:1;padding:12px;display:flex;align-items:center;gap:8px">
+      <span id="nyseDot" style="width:10px;height:10px;border-radius:50%;background:#dc3545;display:inline-block"></span>
+      <span style="font-weight:600">NYSE</span>
+      <span id="nyseSessionText" style="color:var(--text-muted)">CLOSED</span>
+    </div>
+  </div>
+
+  <!-- 4 Scanner Status Cards (2x2 Grid) -->
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px">
+
+    <!-- KRX 오프닝 스캐너 -->
+    <div class="card" id="koCard" style="padding:0;overflow:hidden">
+      <div style="display:flex;align-items:center;justify-content:space-between;padding:16px 20px 0">
+        <div style="display:flex;align-items:center;gap:8px">
+          <span style="font-size:16px">&#x1F305;</span>
+          <span style="font-weight:700;font-size:14px">KRX 오프닝</span>
+          <span class="badge" id="koStateBadge" style="font-size:11px">STOPPED</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px">
+          <span style="font-size:12px;color:var(--text-muted)" id="koMode">-</span>
+          <button class="bot-toggle bot-toggle-sm" id="koSwitch" aria-pressed="false" title="KRX 오프닝 시작/중지" style="width:90px;flex-shrink:0">
+            <span class="bot-toggle-knob"></span>
+            <span class="bot-toggle-label">OFF</span>
+          </button>
+        </div>
+      </div>
+      <div style="padding:12px 20px;display:grid;grid-template-columns:repeat(auto-fit,minmax(100px,1fr));gap:12px;font-size:13px">
+        <div>
+          <div style="color:var(--text-muted);font-size:11px;text-transform:uppercase;letter-spacing:.5px">상태</div>
+          <div style="font-weight:700;font-family:var(--font-mono)" id="koStatus">-</div>
+        </div>
+        <div>
+          <div style="color:var(--text-muted);font-size:11px;text-transform:uppercase;letter-spacing:.5px">스캔 대상</div>
+          <div style="font-weight:700;font-family:var(--font-mono)" id="koScanCount">-</div>
+        </div>
+        <div>
+          <div style="color:var(--text-muted);font-size:11px;text-transform:uppercase;letter-spacing:.5px">포지션</div>
+          <div style="font-weight:700;font-family:var(--font-mono)" id="koPositions">-</div>
+        </div>
+        <div>
+          <div style="color:var(--text-muted);font-size:11px;text-transform:uppercase;letter-spacing:.5px">마지막 틱</div>
+          <div style="font-weight:700;font-family:var(--font-mono);font-size:12px" id="koLastTick">-</div>
+        </div>
+      </div>
+      <div style="padding:0 20px 12px">
+        <div style="color:var(--text-muted);font-size:11px;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">스캔 종목</div>
+        <div id="koMarkets" style="display:flex;flex-wrap:wrap;gap:4px;font-size:12px">
+          <span style="color:var(--text-muted)">-</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- KRX 올데이 스캐너 -->
+    <div class="card" id="kaCard" style="padding:0;overflow:hidden">
+      <div style="display:flex;align-items:center;justify-content:space-between;padding:16px 20px 0">
+        <div style="display:flex;align-items:center;gap:8px">
+          <span style="font-size:16px">&#x2600;</span>
+          <span style="font-weight:700;font-size:14px">KRX 올데이</span>
+          <span class="badge" id="kaStateBadge" style="font-size:11px">STOPPED</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px">
+          <span style="font-size:12px;color:var(--text-muted)" id="kaMode2">-</span>
+          <button class="bot-toggle bot-toggle-sm" id="kaSwitch" aria-pressed="false" title="KRX 올데이 시작/중지" style="width:90px;flex-shrink:0">
+            <span class="bot-toggle-knob"></span>
+            <span class="bot-toggle-label">OFF</span>
+          </button>
+        </div>
+      </div>
+      <div style="padding:12px 20px;display:grid;grid-template-columns:repeat(auto-fit,minmax(100px,1fr));gap:12px;font-size:13px">
+        <div>
+          <div style="color:var(--text-muted);font-size:11px;text-transform:uppercase;letter-spacing:.5px">상태</div>
+          <div style="font-weight:700;font-family:var(--font-mono)" id="kaStatus">-</div>
+        </div>
+        <div>
+          <div style="color:var(--text-muted);font-size:11px;text-transform:uppercase;letter-spacing:.5px">스캔 대상</div>
+          <div style="font-weight:700;font-family:var(--font-mono)" id="kaScanCount">-</div>
+        </div>
+        <div>
+          <div style="color:var(--text-muted);font-size:11px;text-transform:uppercase;letter-spacing:.5px">포지션</div>
+          <div style="font-weight:700;font-family:var(--font-mono)" id="kaPositions">-</div>
+        </div>
+        <div>
+          <div style="color:var(--text-muted);font-size:11px;text-transform:uppercase;letter-spacing:.5px">마지막 틱</div>
+          <div style="font-weight:700;font-family:var(--font-mono);font-size:12px" id="kaLastTick">-</div>
+        </div>
+      </div>
+      <div style="padding:0 20px 12px">
+        <div style="color:var(--text-muted);font-size:11px;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">스캔 종목</div>
+        <div id="kaMarkets" style="display:flex;flex-wrap:wrap;gap:4px;font-size:12px">
+          <span style="color:var(--text-muted)">-</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- NYSE 오프닝 스캐너 -->
+    <div class="card" id="noCard" style="padding:0;overflow:hidden">
+      <div style="display:flex;align-items:center;justify-content:space-between;padding:16px 20px 0">
+        <div style="display:flex;align-items:center;gap:8px">
+          <span style="font-size:16px">&#x1F319;</span>
+          <span style="font-weight:700;font-size:14px">NYSE 오프닝</span>
+          <span class="badge" id="noStateBadge" style="font-size:11px">STOPPED</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px">
+          <span style="font-size:12px;color:var(--text-muted)" id="noMode2">-</span>
+          <button class="bot-toggle bot-toggle-sm" id="noSwitch" aria-pressed="false" title="NYSE 오프닝 시작/중지" style="width:90px;flex-shrink:0">
+            <span class="bot-toggle-knob"></span>
+            <span class="bot-toggle-label">OFF</span>
+          </button>
+        </div>
+      </div>
+      <div style="padding:12px 20px;display:grid;grid-template-columns:repeat(auto-fit,minmax(100px,1fr));gap:12px;font-size:13px">
+        <div>
+          <div style="color:var(--text-muted);font-size:11px;text-transform:uppercase;letter-spacing:.5px">상태</div>
+          <div style="font-weight:700;font-family:var(--font-mono)" id="noStatus">-</div>
+        </div>
+        <div>
+          <div style="color:var(--text-muted);font-size:11px;text-transform:uppercase;letter-spacing:.5px">스캔 대상</div>
+          <div style="font-weight:700;font-family:var(--font-mono)" id="noScanCount">-</div>
+        </div>
+        <div>
+          <div style="color:var(--text-muted);font-size:11px;text-transform:uppercase;letter-spacing:.5px">포지션</div>
+          <div style="font-weight:700;font-family:var(--font-mono)" id="noPositions">-</div>
+        </div>
+        <div>
+          <div style="color:var(--text-muted);font-size:11px;text-transform:uppercase;letter-spacing:.5px">마지막 틱</div>
+          <div style="font-weight:700;font-family:var(--font-mono);font-size:12px" id="noLastTick">-</div>
+        </div>
+      </div>
+      <div style="padding:0 20px 12px">
+        <div style="color:var(--text-muted);font-size:11px;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">스캔 종목</div>
+        <div id="noMarkets" style="display:flex;flex-wrap:wrap;gap:4px;font-size:12px">
+          <span style="color:var(--text-muted)">-</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- NYSE 올데이 스캐너 -->
+    <div class="card" id="naCard" style="padding:0;overflow:hidden">
+      <div style="display:flex;align-items:center;justify-content:space-between;padding:16px 20px 0">
+        <div style="display:flex;align-items:center;gap:8px">
+          <span style="font-size:16px">&#x1F30D;</span>
+          <span style="font-weight:700;font-size:14px">NYSE 올데이</span>
+          <span class="badge" id="naStateBadge" style="font-size:11px">STOPPED</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px">
+          <span style="font-size:12px;color:var(--text-muted)" id="naMode2">-</span>
+          <button class="bot-toggle bot-toggle-sm" id="naSwitch" aria-pressed="false" title="NYSE 올데이 시작/중지" style="width:90px;flex-shrink:0">
+            <span class="bot-toggle-knob"></span>
+            <span class="bot-toggle-label">OFF</span>
+          </button>
+        </div>
+      </div>
+      <div style="padding:12px 20px;display:grid;grid-template-columns:repeat(auto-fit,minmax(100px,1fr));gap:12px;font-size:13px">
+        <div>
+          <div style="color:var(--text-muted);font-size:11px;text-transform:uppercase;letter-spacing:.5px">상태</div>
+          <div style="font-weight:700;font-family:var(--font-mono)" id="naStatus">-</div>
+        </div>
+        <div>
+          <div style="color:var(--text-muted);font-size:11px;text-transform:uppercase;letter-spacing:.5px">스캔 대상</div>
+          <div style="font-weight:700;font-family:var(--font-mono)" id="naScanCount">-</div>
+        </div>
+        <div>
+          <div style="color:var(--text-muted);font-size:11px;text-transform:uppercase;letter-spacing:.5px">포지션</div>
+          <div style="font-weight:700;font-family:var(--font-mono)" id="naPositions">-</div>
+        </div>
+        <div>
+          <div style="color:var(--text-muted);font-size:11px;text-transform:uppercase;letter-spacing:.5px">마지막 틱</div>
+          <div style="font-weight:700;font-family:var(--font-mono);font-size:12px" id="naLastTick">-</div>
+        </div>
+      </div>
+      <div style="padding:0 20px 12px">
+        <div style="color:var(--text-muted);font-size:11px;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">스캔 종목</div>
+        <div id="naMarkets" style="display:flex;flex-wrap:wrap;gap:4px;font-size:12px">
+          <span style="color:var(--text-muted)">-</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- KRX 모닝 러쉬 스캐너 -->
+    <div class="card" id="kmrCard" style="padding:0;overflow:hidden">
+      <div style="display:flex;align-items:center;justify-content:space-between;padding:16px 20px 0">
+        <div style="display:flex;align-items:center;gap:8px">
+          <span style="font-size:16px">&#x1F680;</span>
+          <span style="font-weight:700;font-size:14px">국장 모닝 러쉬</span>
+          <span class="badge" id="kmrStateBadge" style="font-size:11px">STOPPED</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px">
+          <span style="font-size:12px;color:var(--text-muted)" id="kmrMode">-</span>
+          <button class="bot-toggle bot-toggle-sm" id="kmrSwitch" aria-pressed="false" title="KRX 모닝 러쉬 시작/중지" style="width:90px;flex-shrink:0">
+            <span class="bot-toggle-knob"></span>
+            <span class="bot-toggle-label">OFF</span>
+          </button>
+        </div>
+      </div>
+      <div style="padding:12px 20px;display:grid;grid-template-columns:repeat(auto-fit,minmax(100px,1fr));gap:12px;font-size:13px">
+        <div>
+          <div style="color:var(--text-muted);font-size:11px;text-transform:uppercase;letter-spacing:.5px">상태</div>
+          <div style="font-weight:700;font-family:var(--font-mono)" id="kmrStatus">-</div>
+        </div>
+        <div>
+          <div style="color:var(--text-muted);font-size:11px;text-transform:uppercase;letter-spacing:.5px">스캔 대상</div>
+          <div style="font-weight:700;font-family:var(--font-mono)" id="kmrScanCount">-</div>
+        </div>
+        <div>
+          <div style="color:var(--text-muted);font-size:11px;text-transform:uppercase;letter-spacing:.5px">포지션</div>
+          <div style="font-weight:700;font-family:var(--font-mono)" id="kmrPositions">-</div>
+        </div>
+        <div>
+          <div style="color:var(--text-muted);font-size:11px;text-transform:uppercase;letter-spacing:.5px">마지막 틱</div>
+          <div style="font-weight:700;font-family:var(--font-mono);font-size:12px" id="kmrLastTick">-</div>
+        </div>
+        <div>
+          <div style="color:var(--text-muted);font-size:11px;text-transform:uppercase;letter-spacing:.5px">갭 기준</div>
+          <div style="font-weight:700;font-family:var(--font-mono)" id="kmrGapThreshold">-</div>
+        </div>
+      </div>
+      <div style="padding:0 20px 12px">
+        <div style="color:var(--text-muted);font-size:11px;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">스캔 종목</div>
+        <div id="kmrMarkets" style="display:flex;flex-wrap:wrap;gap:4px;font-size:12px">
+          <span style="color:var(--text-muted)">-</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- NYSE 모닝 러쉬 스캐너 -->
+    <div class="card" id="nmrCard" style="padding:0;overflow:hidden">
+      <div style="display:flex;align-items:center;justify-content:space-between;padding:16px 20px 0">
+        <div style="display:flex;align-items:center;gap:8px">
+          <span style="font-size:16px">&#x1F680;</span>
+          <span style="font-weight:700;font-size:14px">미장 모닝 러쉬</span>
+          <span class="badge" id="nmrStateBadge" style="font-size:11px">STOPPED</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px">
+          <span style="font-size:12px;color:var(--text-muted)" id="nmrMode">-</span>
+          <button class="bot-toggle bot-toggle-sm" id="nmrSwitch" aria-pressed="false" title="NYSE 모닝 러쉬 시작/중지" style="width:90px;flex-shrink:0">
+            <span class="bot-toggle-knob"></span>
+            <span class="bot-toggle-label">OFF</span>
+          </button>
+        </div>
+      </div>
+      <div style="padding:12px 20px;display:grid;grid-template-columns:repeat(auto-fit,minmax(100px,1fr));gap:12px;font-size:13px">
+        <div>
+          <div style="color:var(--text-muted);font-size:11px;text-transform:uppercase;letter-spacing:.5px">상태</div>
+          <div style="font-weight:700;font-family:var(--font-mono)" id="nmrStatus">-</div>
+        </div>
+        <div>
+          <div style="color:var(--text-muted);font-size:11px;text-transform:uppercase;letter-spacing:.5px">스캔 대상</div>
+          <div style="font-weight:700;font-family:var(--font-mono)" id="nmrScanCount">-</div>
+        </div>
+        <div>
+          <div style="color:var(--text-muted);font-size:11px;text-transform:uppercase;letter-spacing:.5px">포지션</div>
+          <div style="font-weight:700;font-family:var(--font-mono)" id="nmrPositions">-</div>
+        </div>
+        <div>
+          <div style="color:var(--text-muted);font-size:11px;text-transform:uppercase;letter-spacing:.5px">마지막 틱</div>
+          <div style="font-weight:700;font-family:var(--font-mono);font-size:12px" id="nmrLastTick">-</div>
+        </div>
+        <div>
+          <div style="color:var(--text-muted);font-size:11px;text-transform:uppercase;letter-spacing:.5px">갭 기준</div>
+          <div style="font-weight:700;font-family:var(--font-mono)" id="nmrGapThreshold">-</div>
+        </div>
+      </div>
+      <div style="padding:0 20px 12px">
+        <div style="color:var(--text-muted);font-size:11px;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">스캔 종목</div>
+        <div id="nmrMarkets" style="display:flex;flex-wrap:wrap;gap:4px;font-size:12px">
+          <span style="color:var(--text-muted)">-</span>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- Open Positions -->
+  <div class="card" id="positionsCard" style="margin-bottom:16px;padding:0;overflow:hidden">
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:16px 20px">
+      <div style="font-weight:700;font-size:14px;display:flex;align-items:center;gap:8px">
+        <span style="font-size:16px">&#x1F4B0;</span> 보유 포지션
+        <span class="badge" id="posCountBadge" style="font-size:11px">0</span>
+      </div>
+    </div>
+    <div id="posCardsContainer" style="padding:0 16px 16px;display:flex;flex-direction:column;gap:10px">
+      <div style="color:var(--text-muted);font-size:13px;padding:8px 4px">로딩 중...</div>
+    </div>
+  </div>
+
+  <!-- Order Guard (hidden) -->
+  <div class="trades-card" style="margin-bottom:16px;display:none">
+    <div class="trades-header">
+      <div class="trades-title">주문 가드 <span class="badge" id="guardBadge" style="margin-left:8px">-</span></div>
+      <div class="trades-filter">
+        <button class="header-btn" id="guardRefreshBtn" style="width:28px;height:28px;font-size:14px" title="가드 로그 새로고침">&#x21bb;</button>
+      </div>
+    </div>
+    <div style="padding:12px 20px;border-bottom:1px solid var(--border-subtle)">
+      <div style="display:flex;gap:24px;font-size:13px">
+        <div><span style="color:var(--text-muted)">상태:</span> <span style="font-weight:600" id="guardSummary">-</span></div>
+        <div><span style="color:var(--text-muted)">최근:</span> <span style="font-weight:600" id="guardRecent">-</span></div>
+      </div>
+    </div>
+    <table class="trades-table" id="guardTable">
+      <colgroup>
+        <col style="width:22%"><col style="width:16%"><col style="width:14%"><col style="width:14%"><col style="width:34%">
+      </colgroup>
+      <thead>
+        <tr>
+          <th data-guardsort="tsEpochMs" class="sortable">시간 <span class="sort-btn" title="정렬">&#8645;</span></th>
+          <th>종목</th><th>액션</th><th>결과</th><th>사유</th>
+        </tr>
+      </thead>
+      <tbody id="guardTbody">
+        <tr><td colspan="5" style="color:var(--text-muted);padding:16px">로딩 중...</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- Trade Logs -->
+  <div class="table-section">
+    <div class="card" style="padding:0;overflow:hidden">
+      <div class="table-header">
+        <div class="table-title">
+          <span style="color:var(--primary)">&#9776;</span> 거래 내역
+        </div>
+        <div class="table-filters">
+          <input class="input" id="logMarketFilter" placeholder="종목" style="height:32px;width:110px;border-radius:6px;font-size:11px;padding:0 8px"/>
+          <select class="filter-select" id="logActionFilter">
+            <option value="ALL" selected>전체 액션</option>
+            <option value="BUY">BUY</option>
+            <option value="ADD_BUY">ADD_BUY</option>
+            <option value="SELL">SELL</option>
+          </select>
+          <div class="ms" id="logTypeMs" style="width:150px">
+            <button type="button" class="ms-button" style="height:32px;border-radius:6px">
+              <div class="ms-value"><span class="ms-placeholder">유형</span><div class="ms-chips"></div></div>
+              <span class="ms-caret">&#9662;</span>
+            </button>
+            <div class="ms-panel">
+              <input class="ms-search" placeholder="유형 검색..."/>
+              <div class="ms-list"></div>
+              <div class="ms-footer">
+                <button type="button" class="ms-link" data-ms="all">전체 선택</button>
+                <button type="button" class="ms-link" data-ms="none">초기화</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div style="overflow-x:auto">
+        <table class="trade-table" id="logTable">
+          <thead>
+            <tr>
+              <th data-sort="tsEpochMs" class="sortable">시간 <span class="sort-btn" title="정렬">&#8693;</span></th>
+              <th data-sort="market">종목</th>
+              <th data-sort="action">액션</th>
+              <th data-sort="orderType">유형</th>
+              <th data-sort="confidence">점수</th>
+              <th data-sort="price">가격</th>
+              <th data-sort="qty">수량</th>
+              <th data-sort="pnlKrw">손익(KRW)</th>
+            </tr>
+          </thead>
+          <tbody id="logTbody">
+            <tr><td colspan="8" style="color:var(--text-muted);padding:16px">로딩 중...</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="table-footer">
+        <span class="page-info" id="logPagerInfo">1페이지 &middot; 50건</span>
+        <div class="pagination">
+          <button class="page-btn" id="prevPageBtn">&#8249;</button>
+          <button class="page-btn" id="nextPageBtn">&#8250;</button>
+          <select class="filter-select" id="pageSize" style="width:60px">
+            <option value="20">20</option>
+            <option value="50" selected>50</option>
+            <option value="100">100</option>
+          </select>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</main>
+
+<!-- Order guard detail modal -->
+<div class="modal" id="guardModal" aria-hidden="true">
+  <div class="modal-backdrop" data-guard-close></div>
+  <div class="modal-dialog" role="dialog" aria-modal="true" aria-labelledby="guardModalTitle">
+    <div class="modal-header">
+      <div class="modal-title" id="guardModalTitle">주문 가드 상세</div>
+      <button type="button" class="modal-close" aria-label="Close" data-guard-close>&times;</button>
+    </div>
+    <div class="modal-body">
+      <div style="display:flex;flex-direction:column;gap:10px">
+        <div>
+          <div style="font-weight:700;margin-bottom:6px">설명</div>
+          <div id="guardModalKo" style="line-height:1.5">-</div>
+        </div>
+        <div>
+          <div style="font-weight:700;margin-bottom:6px">기술적 상세</div>
+          <pre id="guardModalDetails" style="white-space:pre-wrap;word-break:break-word;background:var(--surface);border:1px solid var(--card-border);border-radius:10px;padding:10px;margin:0;font-family:var(--font-mono);font-size:12px">-</pre>
+        </div>
+        <div>
+          <button type="button" class="guard-chart-btn" id="guardChartBtn">차트</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Scanned symbols modal -->
+<div class="modal" id="scanSymbolsModal" aria-hidden="true">
+  <div class="modal-backdrop" data-scan-close></div>
+  <div class="modal-dialog" role="dialog" aria-modal="true" aria-labelledby="scanSymbolsModalTitle" style="max-width:480px">
+    <div class="modal-header">
+      <div class="modal-title" id="scanSymbolsModalTitle">스캔 종목</div>
+      <button type="button" class="modal-close" aria-label="Close" data-scan-close>&times;</button>
+    </div>
+    <div class="modal-body" style="max-height:60vh;overflow-y:auto">
+      <table class="trade-table" style="width:100%">
+        <thead>
+          <tr><th style="width:40px">#</th><th>종목코드</th></tr>
+        </thead>
+        <tbody id="scanSymbolsTbody"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- Strategy descriptions modal -->
+<div class="modal" id="strategyModal" aria-hidden="true">
+  <div class="modal-backdrop" data-modal-close></div>
+  <div class="modal-dialog" role="dialog" aria-modal="true" aria-labelledby="strategyModalTitle">
+    <div class="modal-header">
+      <div class="modal-title" id="strategyModalTitle">전략 설명</div>
+      <button type="button" class="modal-close" aria-label="Close" data-modal-close>&times;</button>
+    </div>
+    <div class="modal-body" id="strategyModalBody"></div>
+  </div>
+</div>
+
+<!-- Build Info Footer -->
+<footer class="build-footer" id="buildFooter"></footer>
+
+<!-- Mobile Bottom Nav -->
+<nav class="mobile-nav">
+  <a class="mobile-nav-item active" th:href="@{/dashboard}"><span class="mnav-icon">&#x1F4CA;</span>대시보드</a>
+  <a class="mobile-nav-item" th:href="@{/settings}"><span class="mnav-icon">&#x2699;&#xFE0F;</span>설정</a>
+  <a class="mobile-nav-item" th:href="@{/backtest}"><span class="mnav-icon">&#x1F9EA;</span>백테스트</a>
+</nav>
+
+<script src="https://unpkg.com/lightweight-charts@4.1.1/dist/lightweight-charts.standalone.production.js"></script>
+<script th:src="@{/js/autotrade-common.js(v=20260330a)}"></script>
+<script th:src="@{/js/chart-popup.js(v=20260330a)}"></script>
+<script th:src="@{/js/dashboard.js(v=20260330a)}"></script>
+</body>
+</html>
