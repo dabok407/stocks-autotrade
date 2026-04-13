@@ -38,6 +38,8 @@ public class KisPublicClient {
     private static final String TR_DOMESTIC_DAY_CANDLE = "FHKST03010100";
     private static final String TR_OVERSEAS_DAY_CANDLE = "HHDFS76240000";
 
+    private static final String TR_OVERTIME_UPDOWN_RANK = "FHPST02340000";  // 시간외등락율순위 [국내주식-138]
+
     private final KisAuth auth;
     private final RestTemplate restTemplate;
     private final KisProperties props;
@@ -312,6 +314,58 @@ public class KisPublicClient {
             return list;
         }
         log.warn("[VolumeRank] No output field or unexpected type: {}", body.keySet());
+        return Collections.emptyList();
+    }
+
+    /**
+     * 시간외등락율순위 (After-hours price change ranking).
+     * 시간외단일가(16:00~18:00) 등락률 상위 종목 조회.
+     *
+     * TODO: TR_ID 확인 후 교체 필요 (현재 placeholder)
+     * endpoint path도 KIS 포털에서 확인 후 교체 필요.
+     *
+     * @param count max number of symbols to return
+     * @return list of ranking data maps (stck_shrn_iscd=종목코드, stck_prpr=현재가, prdy_ctrt=등락률 등)
+     */
+    @SuppressWarnings("unchecked")
+    public List<Map<String, Object>> getOvertimeUpdownRanking(int count) {
+        String url = UriComponentsBuilder.fromHttpUrl(props.getEffectiveBaseUrl())
+                .path("/uapi/domestic-stock/v1/ranking/overtime-fluctuation")
+                .queryParam("FID_COND_MRKT_DIV_CODE", "J")       // J=주식
+                .queryParam("FID_MRKT_CLS_CODE", "")              // 시장 구분 코드 (공백)
+                .queryParam("FID_COND_SCR_DIV_CODE", "20234")     // Unique key
+                .queryParam("FID_INPUT_ISCD", "0000")             // 전종목
+                .queryParam("FID_DIV_CLS_CODE", "2")              // 2=상승률
+                .queryParam("FID_INPUT_PRICE_1", "")              // 공백=전체
+                .queryParam("FID_INPUT_PRICE_2", "")              // 공백=전체
+                .queryParam("FID_VOL_CNT", "")                    // 공백=전체
+                .queryParam("FID_TRGT_CLS_CODE", "")              // 공백
+                .queryParam("FID_TRGT_EXLS_CLS_CODE", "")         // 공백
+                .build().toUriString();
+
+        HttpHeaders headers = auth.buildHeaders(TR_OVERTIME_UPDOWN_RANK);
+        Map<String, Object> body = callWithRetry(url, HttpMethod.GET, new HttpEntity<>(headers));
+        if (body == null) {
+            log.warn("[OvertimeRank] API returned null");
+            return Collections.emptyList();
+        }
+
+        String rtCd = (String) body.get("rt_cd");
+        if (rtCd != null && !"0".equals(rtCd)) {
+            log.warn("[OvertimeRank] API error: rt_cd={}, msg={}", rtCd, body.get("msg1"));
+            return Collections.emptyList();
+        }
+
+        Object output = body.get("output2");  // 시간외 순위는 output2에 종목 배열
+        if (output instanceof List) {
+            List<Map<String, Object>> list = (List<Map<String, Object>>) output;
+            log.info("[OvertimeRank] Raw output size: {}", list.size());
+            if (list.size() > count) {
+                return new ArrayList<Map<String, Object>>(list.subList(0, count));
+            }
+            return list;
+        }
+        log.warn("[OvertimeRank] No output2 field: {}", body.keySet());
         return Collections.emptyList();
     }
 

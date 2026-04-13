@@ -325,6 +325,9 @@ public class KrxMorningRushService {
         }
         boolean isSessionEnd = (nowMinOfDay >= sessionEndMin);
 
+        // V109: 진입 대기 구간 (레인지 수집 후 ~ 진입 시작 전)
+        boolean isWaitingForEntry = (nowMinOfDay == 9 * 60) && (second < cfg.getEntryDelaySec());
+
         // Update active position count
         int rushPosCount = 0;
         List<PositionEntity> allPos = positionRepo.findAll();
@@ -342,9 +345,7 @@ public class KrxMorningRushService {
             return;
         }
 
-        // 09:00:00 ~ 09:00+entryDelaySec: 레인지 수집 완료 후 진입 대기 구간
-        // 이 구간은 isRangePhase=false, isEntryPhase=false이지만 데이터 유지 필요
-        boolean isWaitingForEntry = (nowMinOfDay == 9 * 60) && (second < cfg.getEntryDelaySec());
+        // V109: 09:00:00~09:00+entryDelaySec: 레인지 수집 완료 후 진입 대기 구간
 
         if (!isRangePhase && !isEntryPhase && !isWaitingForEntry) {
             // Outside operating hours -- reset for next day

@@ -53,6 +53,19 @@ public class KisWebSocketClient {
     // 최신 체결가 저장소: key = symbol (KRX: "005930", US: "NASD.AAPL")
     private final ConcurrentHashMap<String, Double> latestPrices = new ConcurrentHashMap<String, Double>();
 
+    // 가격 업데이트 리스너 (실시간 TP/SL 등)
+    public interface PriceListener {
+        void onPrice(String symbol, double price);
+    }
+    private final java.util.List<PriceListener> priceListeners = new java.util.concurrent.CopyOnWriteArrayList<PriceListener>();
+
+    public void addPriceListener(PriceListener listener) {
+        if (listener != null) priceListeners.add(listener);
+    }
+    public void removePriceListener(PriceListener listener) {
+        if (listener != null) priceListeners.remove(listener);
+    }
+
     // 구독 중인 종목 목록 (재연결 시 재구독용)
     private final Set<String> subscribedSymbols = ConcurrentHashMap.newKeySet();
     // 각 심볼의 tr_id 기록 (재구독용)
@@ -331,7 +344,7 @@ public class KisWebSocketClient {
                 "}";
 
         boolean sent = webSocket.send(json);
-        log.debug("[WS] {} {} (tr_id={}, sent={})",
+        log.info("[WS] {} {} (tr_id={}, sent={})",
                 "1".equals(trType) ? "Subscribe" : "Unsubscribe", trKey, trId, sent);
     }
 
@@ -354,7 +367,7 @@ public class KisWebSocketClient {
 
         // JSON 응답 (구독 확인/에러 등)은 무시
         if (text.startsWith("{")) {
-            log.debug("[WS] JSON response: {}", text.length() > 200 ? text.substring(0, 200) : text);
+            log.info("[WS] JSON response: {}", text.length() > 200 ? text.substring(0, 200) : text);
             return;
         }
 
@@ -376,6 +389,9 @@ public class KisWebSocketClient {
                     double price = parseDoubleSafe(fields[2]);
                     if (price > 0) {
                         latestPrices.put(stockCode, price);
+                        for (PriceListener l : priceListeners) {
+                            try { l.onPrice(stockCode, price); } catch (Exception ex) { /* ignore */ }
+                        }
                     }
                 }
             } else if ("HDFSCNT0".equals(trId)) {

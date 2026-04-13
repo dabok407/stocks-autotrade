@@ -26,10 +26,10 @@ public class KrxMorningRushConfigEntity {
     private String mode = "PAPER";
 
     @Column(name = "top_n", nullable = false)
-    private int topN = 20;
+    private int topN = 15;
 
     @Column(name = "max_positions", nullable = false)
-    private int maxPositions = 2;
+    private int maxPositions = 3;
 
     @Column(name = "order_sizing_mode", nullable = false, length = 10)
     private String orderSizingMode = "PCT";
@@ -50,10 +50,10 @@ public class KrxMorningRushConfigEntity {
     private int checkIntervalSec = 5;
 
     @Column(name = "tp_pct", nullable = false, precision = 5, scale = 2)
-    private BigDecimal tpPct = BigDecimal.valueOf(1.5);
+    private BigDecimal tpPct = BigDecimal.valueOf(3.0);
 
     @Column(name = "sl_pct", nullable = false, precision = 5, scale = 2)
-    private BigDecimal slPct = BigDecimal.valueOf(1.5);
+    private BigDecimal slPct = BigDecimal.valueOf(3.0);
 
     @Column(name = "entry_delay_sec", nullable = false)
     private int entryDelaySec = 30;
@@ -75,6 +75,11 @@ public class KrxMorningRushConfigEntity {
 
     @Column(name = "min_price_krw", nullable = false)
     private int minPriceKrw = 1000;
+
+    // 시간외 거래량 최소 기준 (2026-04-11 추가)
+    // 시간외 등락률 +10%여도 거래량 1~50주면 "가짜 상한가" → 09:00 모멘텀 없음
+    @Column(name = "min_overtime_volume")
+    private long minOvertimeVolume = 10000;
 
     // ========== Getters & Setters ==========
 
@@ -136,6 +141,9 @@ public class KrxMorningRushConfigEntity {
 
     public int getMinPriceKrw() { return minPriceKrw; }
     public void setMinPriceKrw(int v) { this.minPriceKrw = Math.max(0, v); }
+
+    public long getMinOvertimeVolume() { return minOvertimeVolume; }
+    public void setMinOvertimeVolume(long v) { this.minOvertimeVolume = Math.max(0, v); }
 
     /** Excluded symbols as Set (CSV parsed) */
     public Set<String> getExcludeSymbolsSet() {

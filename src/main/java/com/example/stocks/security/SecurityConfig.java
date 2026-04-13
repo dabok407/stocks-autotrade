@@ -38,6 +38,7 @@ public class SecurityConfig extends WebSecurityConfigurerAdapter {
                 .antMatchers("/api/backtest/**", "/api/strategies", "/api/intervals").permitAll()
                 .antMatchers("/api/report/**").permitAll()
                 .antMatchers("/api/candle-export/**").permitAll()
+                .antMatchers("/api/krx/overtime-rank/**").permitAll()
                 .anyRequest().authenticated()
             .and()
 
