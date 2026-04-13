@@ -165,10 +165,8 @@ public class KrxMorningRushService {
             decisionLog.addFirst(d);
             while (decisionLog.size() > MAX_DECISION_LOG) decisionLog.removeLast();
         }
-        // 파일 로그 기록 (2026-04-11 버그 수정: 메모리에만 저장하고 파일에 안 남던 문제)
-        if ("SKIPPED".equals(result) || "BLOCKED".equals(result) || "ERROR".equals(result)) {
-            log.info("[KrxMorningRush] {} {} {} {} | {}", symbol, action, result, reasonCode, reason);
-        }
+        // V109: 모든 decision을 INFO 로그로 기록 (분석용)
+        log.info("[KrxMorningRush] {} {} {} {} | {}", symbol, action, result, reasonCode, reason);
     }
 
     public List<Map<String, Object>> getRecentDecisions(int limit) {
@@ -673,11 +671,17 @@ public class KrxMorningRushService {
         int requiredConfirms = cfg.getConfirmCount();
 
         for (String symbol : prevCloseMap.keySet()) {
-            if (ownedSymbols.contains(symbol)) continue;
+            if (ownedSymbols.contains(symbol)) {
+                addDecision(symbol, "BUY", "SKIPPED", "ALREADY_HELD", "이미 보유 중");
+                continue;
+            }
             if (rushPosCount >= cfg.getMaxPositions()) break;
 
             // 당일 매매 완료 종목 재매수 차단 (종목당 1회, 2026-04-11)
-            if (tradedSymbols.contains(symbol)) continue;
+            if (tradedSymbols.contains(symbol)) {
+                addDecision(symbol, "BUY", "SKIPPED", "ALREADY_TRADED", "당일 매매 완료 (재매수 금지)");
+                continue;
+            }
 
             Double prevClose = prevCloseMap.get(symbol);
             if (prevClose == null || prevClose <= 0) continue;
@@ -692,16 +696,22 @@ public class KrxMorningRushService {
                         currentPrice = ticker.trade_price;
                     }
                 } catch (Exception e) {
-                    log.debug("[KrxMorningRush] {} REST fallback failed", symbol);
+                    addDecision(symbol, "BUY", "SKIPPED", "PRICE_FETCH_FAIL",
+                            "WS/REST 가격 조회 모두 실패");
                     continue;
                 }
             }
             if (currentPrice <= 0) {
+                addDecision(symbol, "BUY", "SKIPPED", "NO_PRICE", "현재가 0 (조회 불가)");
                 continue;
             }
 
             // Min price filter
-            if (currentPrice < cfg.getMinPriceKrw()) continue;
+            if (currentPrice < cfg.getMinPriceKrw()) {
+                addDecision(symbol, "BUY", "SKIPPED", "MIN_PRICE",
+                        String.format("price=%.0f < minPrice=%d", currentPrice, cfg.getMinPriceKrw()));
+                continue;
+            }
 
             // VI proximity check
             if (StockSafetyGuard.isNearViLimit(currentPrice, prevClose)) {
@@ -825,6 +835,13 @@ public class KrxMorningRushService {
             if (currentPrice <= 0) continue;
 
             double pnlPct = (currentPrice - avgPrice) / avgPrice;
+
+            // V109: 포지션 상태 로그 (매 체크마다 기록)
+            long elapsedMinTotal = pe.getOpenedAt() != null
+                    ? Duration.between(pe.getOpenedAt(), Instant.now()).toMinutes() : 0;
+            addDecision(pe.getSymbol(), "MONITOR", "CHECK", "POS_STATUS",
+                    String.format(Locale.ROOT, "price=%.0f avg=%.0f pnl=%.2f%% elapsed=%dmin tp=%.1f%% sl=%.1f%%",
+                            currentPrice, avgPrice, pnlPct * 100, elapsedMinTotal, tpPct * 100, slPct * 100));
 
             // TP check
             if (pnlPct >= tpPct) {
