@@ -84,6 +84,19 @@ public class KrxMorningRushService {
     private volatile double cachedSlPct = 3.0;
     private volatile KisWebSocketClient.PriceListener wsListener;
 
+    // ── 상태 머신 (V109: 시간 빈틈 버그 근본 해결) ──
+    // 기존 boolean 플래그(rangeCollected, entryPhaseComplete) → Phase enum 전환
+    // Phase 전환은 명시적으로만 발생, 시간 빈틈에 의한 데이터 삭제 불가
+    enum Phase {
+        IDLE,               // 운영시간 외 (데이터 없음)
+        COLLECTING_RANGE,   // 08:50~09:00 레인지 수집 중
+        RANGE_COLLECTED,    // 수집 완료, 진입 대기 중 (09:00:00~09:00:30)
+        SCANNING,           // 09:00:30~09:10 진입 스캔 중
+        MONITORING,         // 09:10~sessionEnd 보유 모니터링
+        SESSION_END         // sessionEnd 이후 강제 청산
+    }
+    private volatile Phase currentPhase = Phase.IDLE;
+
     // Dashboard state
     private volatile String statusText = "STOPPED";
     private volatile int scanCount = 0;
@@ -98,9 +111,9 @@ public class KrxMorningRushService {
     // confirm 가격 이력 (상승 추세 확인용, 2026-04-09 추가)
     private final ConcurrentHashMap<String, Object> confirmPriceHistory = new ConcurrentHashMap<String, Object>();
 
-    // Session phase tracking
-    private volatile boolean rangeCollected = false;
-    private volatile boolean entryPhaseComplete = false;
+    // V109 하위 호환: 기존 코드에서 참조하는 플래그 (Phase enum 기반으로 동작)
+    private boolean rangeCollected() { return currentPhase.ordinal() >= Phase.RANGE_COLLECTED.ordinal(); }
+    private boolean entryPhaseComplete() { return currentPhase.ordinal() >= Phase.MONITORING.ordinal(); }
 
     // 당일 매매 완료 종목 (익절/손절 후 재매수 방지, 2026-04-11 추가)
     // 모닝러쉬 원칙: 종목당 1회만 매수. 매도 후 같은 종목 재진입 금지.
@@ -180,8 +193,7 @@ public class KrxMorningRushService {
         }
         log.info("[KrxMorningRush] starting...");
         statusText = "RUNNING";
-        rangeCollected = false;
-        entryPhaseComplete = false;
+        currentPhase = Phase.IDLE;
         confirmCounts.clear();
         prevCloseMap.clear();
         avgVolumeMap.clear();
@@ -311,22 +323,22 @@ public class KrxMorningRushService {
         int nowMinOfDay = hour * 60 + minute;
 
         int sessionEndMin = cfg.getSessionEndHour() * 60 + cfg.getSessionEndMin();
+        int entryDelaySec = cfg.getEntryDelaySec();
 
-        // Phase timing (KST)
-        // Range:  08:50 - 09:00  (collect previous close + avg volume)
-        // Entry:  09:00 + entryDelaySec ~ 09:10  (10분 entry window, 5분→10분 확장)
-        // Hold:   09:10 ~ session_end (보유만, 신규 매수 X)
-        boolean isRangePhase = (nowMinOfDay >= 8 * 60 + 50) && (nowMinOfDay < 9 * 60);
-        boolean isEntryPhase;
-        if (nowMinOfDay == 9 * 60) {
-            isEntryPhase = second >= cfg.getEntryDelaySec();
-        } else {
-            isEntryPhase = (nowMinOfDay > 9 * 60) && (nowMinOfDay < sessionEndMin);
-        }
-        boolean isSessionEnd = (nowMinOfDay >= sessionEndMin);
-
-        // V109: 진입 대기 구간 (레인지 수집 후 ~ 진입 시작 전)
-        boolean isWaitingForEntry = (nowMinOfDay == 9 * 60) && (second < cfg.getEntryDelaySec());
+        // ══════════════════════════════════════════════════════
+        // 상태 머신 기반 Phase 전환 (V109: 시간 빈틈 버그 근본 해결)
+        //
+        // Phase 전환 규칙:
+        //   IDLE → COLLECTING_RANGE : 08:50 도달
+        //   COLLECTING_RANGE → RANGE_COLLECTED : collectRange() 완료
+        //   RANGE_COLLECTED → SCANNING : 09:00 + entryDelaySec 도달
+        //   SCANNING → MONITORING : 09:10 도달
+        //   MONITORING → SESSION_END : sessionEnd 도달
+        //   SESSION_END → IDLE : 다음 날 자동 (데이터 clear)
+        //
+        // 핵심: 데이터 clear는 IDLE 상태에서만 발생
+        // 시간 빈틈이 있어도 phase가 유지되므로 데이터 삭제 불가
+        // ══════════════════════════════════════════════════════
 
         // Update active position count
         int rushPosCount = 0;
@@ -338,65 +350,102 @@ public class KrxMorningRushService {
         }
         activePositions = rushPosCount;
 
-        // Session end: force exit all morning rush positions
-        if (isSessionEnd && rushPosCount > 0) {
-            statusText = "SESSION_END";
-            forceExitAll(cfg);
-            return;
+        // ── Phase 전환 판단 ──
+        switch (currentPhase) {
+            case IDLE:
+                if (nowMinOfDay >= 8 * 60 + 50 && nowMinOfDay < 9 * 60) {
+                    // IDLE → COLLECTING_RANGE
+                    currentPhase = Phase.COLLECTING_RANGE;
+                    confirmCounts.clear();
+                    prevCloseMap.clear();
+                    avgVolumeMap.clear();
+                    tradedSymbols.clear();
+                    log.info("[KrxMorningRush] Phase: IDLE → COLLECTING_RANGE (08:50 도달, 신규 데이터 수집 시작)");
+                } else {
+                    statusText = "IDLE (outside hours)";
+                    return;
+                }
+                break;
+
+            case COLLECTING_RANGE:
+                if (nowMinOfDay >= 9 * 60) {
+                    // 09:00 넘으면 수집 시간 종료 → 자동 전환
+                    if (!prevCloseMap.isEmpty()) {
+                        currentPhase = Phase.RANGE_COLLECTED;
+                        log.info("[KrxMorningRush] Phase: COLLECTING_RANGE → RANGE_COLLECTED (수집 완료, prevClose {}개, 진입 대기)",
+                                prevCloseMap.size());
+                    } else {
+                        log.warn("[KrxMorningRush] 09:00 도달했지만 prevCloseMap 비어있음 — IDLE로 복귀");
+                        currentPhase = Phase.IDLE;
+                        return;
+                    }
+                }
+                break;
+
+            case RANGE_COLLECTED:
+                // 09:00 + entryDelaySec 도달 → SCANNING
+                if (nowMinOfDay > 9 * 60 || (nowMinOfDay == 9 * 60 && second >= entryDelaySec)) {
+                    currentPhase = Phase.SCANNING;
+                    log.info("[KrxMorningRush] Phase: RANGE_COLLECTED → SCANNING (진입 대기 완료, 스캔 시작)");
+                } else {
+                    statusText = "WAITING (entry delay)";
+                    // 실시간 TP/SL 캐시는 업데이트 (기존 포지션 모니터링)
+                    updateRealtimeCache(cfg);
+                    return;
+                }
+                break;
+
+            case SCANNING:
+                if (nowMinOfDay >= 9 * 60 + 10) {
+                    currentPhase = Phase.MONITORING;
+                    log.info("[KrxMorningRush] Phase: SCANNING → MONITORING (09:10 도달, 진입 종료)");
+                }
+                break;
+
+            case MONITORING:
+                if (nowMinOfDay >= sessionEndMin) {
+                    currentPhase = Phase.SESSION_END;
+                    log.info("[KrxMorningRush] Phase: MONITORING → SESSION_END (세션 종료)");
+                }
+                break;
+
+            case SESSION_END:
+                if (rushPosCount > 0) {
+                    statusText = "SESSION_END";
+                    forceExitAll(cfg);
+                }
+                // 세션 종료 후 → IDLE로 복귀 (다음 날 대비)
+                if (rushPosCount <= 0) {
+                    currentPhase = Phase.IDLE;
+                    log.info("[KrxMorningRush] Phase: SESSION_END → IDLE (모든 포지션 청산 완료)");
+                }
+                return;
         }
 
-        // V109: 09:00:00~09:00+entryDelaySec: 레인지 수집 완료 후 진입 대기 구간
-
-        if (!isRangePhase && !isEntryPhase && !isWaitingForEntry) {
-            // Outside operating hours -- reset for next day
-            if (rangeCollected || entryPhaseComplete) {
-                rangeCollected = false;
-                entryPhaseComplete = false;
-                confirmCounts.clear();
-                prevCloseMap.clear();
-                avgVolumeMap.clear();
-                tradedSymbols.clear();
-            }
-            statusText = "IDLE (outside hours)";
-            return;
-        }
-
-        if (isWaitingForEntry) {
-            statusText = "WAITING (entry delay)";
-            return;
-        }
+        statusText = currentPhase.name();
 
         // Throttle: only run trade logic at checkIntervalSec frequency
         long nowMs = System.currentTimeMillis();
         int intervalSec = cfg.getCheckIntervalSec();
         if (nowMs - lastTickEpochMs < intervalSec * 1000L) {
-            return; // skip this second
+            return;
         }
         lastTickEpochMs = nowMs;
 
-        // ---- Range Phase: collect previous close prices ----
-        if (isRangePhase) {
-            statusText = "COLLECTING_RANGE";
+        // ── Phase별 실행 ──
+        if (currentPhase == Phase.COLLECTING_RANGE) {
             collectRange(cfg);
-            return;
         }
 
-        // ---- Entry Phase: scan for gap-up spikes (09:00 ~ 09:10, 10분 entry window) ----
-        if (isEntryPhase && !entryPhaseComplete) {
-            if (nowMinOfDay >= 9 * 60 + 10) {
-                entryPhaseComplete = true;
-                log.info("[KrxMorningRush] Entry phase complete (09:10), switching to MONITORING");
-            } else {
-                statusText = "SCANNING";
-                scanForEntry(cfg);
-            }
+        if (currentPhase == Phase.SCANNING) {
+            scanForEntry(cfg);
         }
 
-        // ---- 실시간 TP/SL 캐시 업데이트 ----
+        // 실시간 TP/SL 캐시 업데이트 (모든 활성 phase에서)
         updateRealtimeCache(cfg);
 
-        // ---- Monitor existing positions for TP/SL/TimeStop (REST fallback) ----
-        if (rushPosCount > 0) {
+        // Monitor existing positions (REST fallback)
+        if (rushPosCount > 0 && currentPhase.ordinal() >= Phase.SCANNING.ordinal()) {
             monitorPositions(cfg);
         }
     }
@@ -404,7 +453,7 @@ public class KrxMorningRushService {
     // ========== Phase 1: Range Collection ==========
 
     private void collectRange(KrxMorningRushConfigEntity cfg) {
-        if (rangeCollected) return;
+        if (currentPhase != Phase.COLLECTING_RANGE) return;
 
         Set<String> excludeSet = cfg.getExcludeSymbolsSet();
 
@@ -562,7 +611,9 @@ public class KrxMorningRushService {
         }
         log.info("[KrxMorningRush] ==========================================");
 
-        rangeCollected = true;
+        // 상태 전환: COLLECTING_RANGE → RANGE_COLLECTED (mainLoop의 다음 tick에서 처리)
+        // collectRange는 여러 번 호출될 수 있으므로 (throttle 간격마다) 여기서는 플래그만
+        currentPhase = Phase.RANGE_COLLECTED;
         log.info("[KrxMorningRush] range collected: {} symbols, prevClose entries: {}",
                 topSymbols.size(), prevCloseMap.size());
     }

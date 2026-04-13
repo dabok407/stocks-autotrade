@@ -82,7 +82,7 @@ public class KrxMorningRushE2EScenarioTest {
         prevCloseMap.put("005930", 58000.0);  // 삼성전자
         prevCloseMap.put("035420", 180000.0); // NAVER
         prevCloseMap.put("000660", 120000.0); // SK하이닉스
-        setField("rangeCollected", true);
+        setPhase("RANGE_COLLECTED");
 
         assertEquals(3, prevCloseMap.size(), "수집 후 3개 종목 있어야 함");
 
@@ -122,7 +122,7 @@ public class KrxMorningRushE2EScenarioTest {
     public void scenario2_waiting29Seconds() throws Exception {
         ConcurrentHashMap<String, Double> prevCloseMap = getPrevCloseMap();
         prevCloseMap.put("005930", 58000.0);
-        setField("rangeCollected", true);
+        setPhase("RANGE_COLLECTED");
 
         int nowMinOfDay = 9 * 60;
         int second = 29;
@@ -150,7 +150,7 @@ public class KrxMorningRushE2EScenarioTest {
         ConcurrentHashMap<String, Double> prevCloseMap = getPrevCloseMap();
         prevCloseMap.put("005930", 58000.0);
         prevCloseMap.put("035420", 180000.0);
-        setField("rangeCollected", true);
+        setPhase("RANGE_COLLECTED");
 
         int nowMinOfDay = 9 * 60;
         int second = 30;
@@ -179,7 +179,7 @@ public class KrxMorningRushE2EScenarioTest {
         prevCloseMap.put("038680", 5230.0);   // 에스넷
         prevCloseMap.put("019680", 1678.0);   // 대교
         prevCloseMap.put("000230", 10890.0);  // 일동홀딩스
-        setField("rangeCollected", true);
+        setPhase("RANGE_COLLECTED");
         assertEquals(3, prevCloseMap.size(), "RANGE에서 3개 수집");
 
         // Phase 2: WAITING (09:00:10) — 데이터 유지
@@ -206,7 +206,7 @@ public class KrxMorningRushE2EScenarioTest {
     public void scenario5_bugReproduction_withoutFix() throws Exception {
         ConcurrentHashMap<String, Double> prevCloseMap = getPrevCloseMap();
         prevCloseMap.put("005930", 58000.0);
-        setField("rangeCollected", true);
+        setPhase("RANGE_COLLECTED");
 
         // 수정 전 코드에서의 판단 (isWaitingForEntry 없음)
         int nowMinOfDay = 9 * 60;
@@ -232,7 +232,7 @@ public class KrxMorningRushE2EScenarioTest {
     public void scenario6_afterSessionEndClearsNormally() throws Exception {
         ConcurrentHashMap<String, Double> prevCloseMap = getPrevCloseMap();
         prevCloseMap.put("005930", 58000.0);
-        setField("rangeCollected", true);
+        setPhase("RANGE_COLLECTED");
 
         boolean wouldClearAt1800 = wouldClear(18, 0, 0, 30);
         // 18:00은 sessionEnd(10:00) 이후이므로 tick()에서 SESSION_END로 먼저 처리되지만
@@ -285,6 +285,22 @@ public class KrxMorningRushE2EScenarioTest {
         Field f = KrxMorningRushService.class.getDeclaredField(name);
         f.setAccessible(true);
         f.set(service, value);
+    }
+
+    private void setPhase(String phaseName) throws Exception {
+        // Phase enum은 inner class이므로 reflection으로 접근
+        Class<?> phaseClass = null;
+        for (Class<?> inner : KrxMorningRushService.class.getDeclaredClasses()) {
+            if (inner.getSimpleName().equals("Phase")) {
+                phaseClass = inner;
+                break;
+            }
+        }
+        assertNotNull(phaseClass, "Phase enum을 찾을 수 없음");
+        Object phaseValue = Enum.valueOf((Class<Enum>) phaseClass, phaseName);
+        Field f = KrxMorningRushService.class.getDeclaredField("currentPhase");
+        f.setAccessible(true);
+        f.set(service, phaseValue);
     }
 
     private KrxMorningRushConfigEntity buildConfig() {
