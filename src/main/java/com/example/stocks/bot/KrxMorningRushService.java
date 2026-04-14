@@ -799,11 +799,14 @@ public class KrxMorningRushService {
 
             // Execute BUY
             try {
-                executeBuy(symbol, currentPrice, gapPct, cfg, orderAmount);
-                rushPosCount++;
-                tradedSymbols.add(symbol); // 당일 재매수 방지
-                addDecision(symbol, "BUY", "EXECUTED", "GAP_UP",
-                        String.format("Gap %.2f%% price=%.0f prevClose=%.0f", gapPct * 100, currentPrice, prevClose));
+                boolean bought = executeBuy(symbol, currentPrice, gapPct, cfg, orderAmount);
+                if (bought) {
+                    rushPosCount++;
+                    tradedSymbols.add(symbol); // 당일 재매수 방지
+                    addDecision(symbol, "BUY", "EXECUTED", "GAP_UP",
+                            String.format("Gap %.2f%% price=%.0f prevClose=%.0f", gapPct * 100, currentPrice, prevClose));
+                }
+                // bought=false인 경우 executeBuy 내부에서 이미 BLOCKED/ERROR 로그 기록됨
             } catch (Exception e) {
                 log.error("[KrxMorningRush] buy execution failed for {}", symbol, e);
                 addDecision(symbol, "BUY", "ERROR", "EXECUTION_FAIL",
@@ -903,12 +906,13 @@ public class KrxMorningRushService {
 
     // ========== Order Execution ==========
 
-    private void executeBuy(final String symbol, final double price, double gapPct,
+    /** @return true if buy succeeded, false if blocked/failed */
+    private boolean executeBuy(final String symbol, final double price, double gapPct,
                              final KrxMorningRushConfigEntity cfg, BigDecimal orderAmount) {
         if (orderAmount.compareTo(BigDecimal.valueOf(50000)) < 0) {
             addDecision(symbol, "BUY", "BLOCKED", "ORDER_TOO_SMALL",
                     String.format("Order amount %s below minimum 50,000", orderAmount.toPlainString()));
-            return;
+            return false;
         }
 
         boolean isPaper = "PAPER".equalsIgnoreCase(cfg.getMode());
@@ -921,26 +925,26 @@ public class KrxMorningRushService {
             qty = (int) ((orderAmount.doubleValue() - fee) / fillPrice);
             if (qty <= 0) {
                 addDecision(symbol, "BUY", "BLOCKED", "QTY_ZERO", "Calculated qty is 0");
-                return;
+                return false;
             }
         } else {
             int estQty = (int) (orderAmount.doubleValue() / price);
             if (estQty <= 0) {
                 addDecision(symbol, "BUY", "BLOCKED", "QTY_ZERO", "Estimated qty is 0");
-                return;
+                return false;
             }
             try {
                 LiveOrderService.LiveOrderResult r = liveOrders.placeBuyOrder(symbol, MarketType.KRX, estQty, price);
                 if (!r.isFilled()) {
                     addDecision(symbol, "BUY", "ERROR", "ORDER_NOT_FILLED",
                             String.format("Order not filled state=%s qty=%d", r.state, r.executedQty));
-                    return;
+                    return false;
                 }
                 fillPrice = r.avgPrice > 0 ? r.avgPrice : price;
                 qty = r.executedQty > 0 ? r.executedQty : estQty;
             } catch (Exception e) {
                 addDecision(symbol, "BUY", "ERROR", "ORDER_EXCEPTION", "Order failed: " + e.getMessage());
-                return;
+                return false;
             }
         }
 
@@ -986,6 +990,7 @@ public class KrxMorningRushService {
         cachedWidePeriodMs = cfg.getWidePeriodMin() * 60_000L;
 
         log.info("[KrxMorningRush] BUY {} mode={} price={} qty={}", symbol, cfg.getMode(), fillPrice, qty);
+        return true;
     }
 
     private void executeSell(final PositionEntity pe, double price, Signal signal,
