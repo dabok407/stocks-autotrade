@@ -81,6 +81,22 @@ public class KrxMorningRushConfigEntity {
     @Column(name = "min_overtime_volume")
     private long minOvertimeVolume = 10000;
 
+    // ── V33: TP_TRAIL + 티어드 SL (코인봇 구조 동일) ──
+    @Column(name = "tp_trail_activate_pct", nullable = false, precision = 5, scale = 2)
+    private BigDecimal tpTrailActivatePct = BigDecimal.valueOf(3.0);
+
+    @Column(name = "tp_trail_drop_pct", nullable = false, precision = 5, scale = 2)
+    private BigDecimal tpTrailDropPct = BigDecimal.valueOf(1.5);
+
+    @Column(name = "grace_period_sec", nullable = false)
+    private int gracePeriodSec = 30;
+
+    @Column(name = "wide_sl_pct", nullable = false, precision = 5, scale = 2)
+    private BigDecimal wideSlPct = BigDecimal.valueOf(3.0);
+
+    @Column(name = "wide_period_min", nullable = false)
+    private int widePeriodMin = 10;
+
     // ========== Getters & Setters ==========
 
     public int getId() { return id; }
@@ -144,6 +160,21 @@ public class KrxMorningRushConfigEntity {
 
     public long getMinOvertimeVolume() { return minOvertimeVolume; }
     public void setMinOvertimeVolume(long v) { this.minOvertimeVolume = Math.max(0, v); }
+
+    public BigDecimal getTpTrailActivatePct() { return tpTrailActivatePct; }
+    public void setTpTrailActivatePct(BigDecimal v) { this.tpTrailActivatePct = v != null ? v : BigDecimal.valueOf(3.0); }
+
+    public BigDecimal getTpTrailDropPct() { return tpTrailDropPct; }
+    public void setTpTrailDropPct(BigDecimal v) { this.tpTrailDropPct = v != null ? v : BigDecimal.valueOf(1.5); }
+
+    public int getGracePeriodSec() { return gracePeriodSec; }
+    public void setGracePeriodSec(int v) { this.gracePeriodSec = Math.max(0, v); }
+
+    public BigDecimal getWideSlPct() { return wideSlPct; }
+    public void setWideSlPct(BigDecimal v) { this.wideSlPct = v != null ? v : BigDecimal.valueOf(3.0); }
+
+    public int getWidePeriodMin() { return widePeriodMin; }
+    public void setWidePeriodMin(int v) { this.widePeriodMin = Math.max(1, v); }
 
     /** Excluded symbols as Set (CSV parsed) */
     public Set<String> getExcludeSymbolsSet() {

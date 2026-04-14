@@ -79,9 +79,15 @@ public class KrxMorningRushService {
                     return t;
                 }
             });
+    // V33: positionCache [avgPrice, peakPrice, trailActivated(0/1), openedAtEpochMs]
     private final ConcurrentHashMap<String, double[]> positionCache = new ConcurrentHashMap<String, double[]>();
-    private volatile double cachedTpPct = 3.0;
-    private volatile double cachedSlPct = 3.0;
+    // V33: TP_TRAIL + 티어드 SL cached 변수 (DB에서 갱신)
+    private volatile double cachedTpTrailActivatePct = 3.0;
+    private volatile double cachedTpTrailDropPct = 1.5;
+    private volatile double cachedSlPct = 3.0;        // Tight SL (wide_period 이후)
+    private volatile double cachedWideSlPct = 3.0;    // Wide SL (grace 후 ~ wide_period)
+    private volatile long cachedGracePeriodMs = 30_000L;
+    private volatile long cachedWidePeriodMs = 10 * 60_000L;
     private volatile KisWebSocketClient.PriceListener wsListener;
 
     // ── 상태 머신 (V109: 시간 빈틈 버그 근본 해결) ──
@@ -808,9 +814,12 @@ public class KrxMorningRushService {
 
     // ========== Position Monitoring (TP/SL/TimeStop) ==========
 
+    /**
+     * V33: REST 폴링 기반 TP/SL 모니터링 (WebSocket 실시간의 백업).
+     * WebSocket이 끊기거나 지연될 때를 대비한 안전장치.
+     */
     private void monitorPositions(KrxMorningRushConfigEntity cfg) {
         List<PositionEntity> allPos = positionRepo.findAll();
-        double tpPct = cfg.getTpPct().doubleValue() / 100.0;
         double slPct = cfg.getSlPct().doubleValue() / 100.0;
         int timeStopMin = cfg.getTimeStopMin();
 
@@ -820,7 +829,6 @@ public class KrxMorningRushService {
             double avgPrice = pe.getAvgPrice().doubleValue();
             if (avgPrice <= 0) continue;
 
-            // Get current price
             double currentPrice = kisWs.getLatestPrice(pe.getSymbol());
             if (currentPrice <= 0) {
                 try {
@@ -836,34 +844,23 @@ public class KrxMorningRushService {
 
             double pnlPct = (currentPrice - avgPrice) / avgPrice;
 
-            // V109: 포지션 상태 로그 (매 체크마다 기록)
             long elapsedMinTotal = pe.getOpenedAt() != null
                     ? Duration.between(pe.getOpenedAt(), Instant.now()).toMinutes() : 0;
             addDecision(pe.getSymbol(), "MONITOR", "CHECK", "POS_STATUS",
-                    String.format(Locale.ROOT, "price=%.0f avg=%.0f pnl=%.2f%% elapsed=%dmin tp=%.1f%% sl=%.1f%%",
-                            currentPrice, avgPrice, pnlPct * 100, elapsedMinTotal, tpPct * 100, slPct * 100));
+                    String.format(Locale.ROOT, "price=%.0f avg=%.0f pnl=%.2f%% elapsed=%dmin",
+                            currentPrice, avgPrice, pnlPct * 100, elapsedMinTotal));
 
-            // TP check
-            if (pnlPct >= tpPct) {
-                String reason = String.format(Locale.ROOT,
-                        "TP hit: pnl=%.2f%% >= tp=%.2f%% price=%.0f avg=%.0f",
-                        pnlPct * 100, tpPct * 100, currentPrice, avgPrice);
-                executeSell(pe, currentPrice, Signal.of(SignalAction.SELL, null, reason), cfg);
-                addDecision(pe.getSymbol(), "SELL", "EXECUTED", "TP", reason);
-                continue;
-            }
-
-            // SL check
+            // SL (REST 백업 — 실시간에서 놓칠 경우)
             if (pnlPct <= -slPct) {
                 String reason = String.format(Locale.ROOT,
-                        "SL hit: pnl=%.2f%% <= sl=-%.2f%% price=%.0f avg=%.0f",
+                        "SL hit: pnl=%.2f%% <= sl=-%.2f%% price=%.0f avg=%.0f (REST backup)",
                         pnlPct * 100, slPct * 100, currentPrice, avgPrice);
                 executeSell(pe, currentPrice, Signal.of(SignalAction.SELL, null, reason), cfg);
                 addDecision(pe.getSymbol(), "SELL", "EXECUTED", "SL", reason);
                 continue;
             }
 
-            // Time stop check
+            // Time stop
             if (pe.getOpenedAt() != null && timeStopMin > 0) {
                 long elapsedMin = Duration.between(pe.getOpenedAt(), Instant.now()).toMinutes();
                 if (elapsedMin >= timeStopMin && pnlPct < 0) {
@@ -979,10 +976,14 @@ public class KrxMorningRushService {
             }
         });
 
-        // 실시간 TP/SL 캐시에 즉시 등록
-        positionCache.put(symbol, new double[]{fillPrice});
-        cachedTpPct = cfg.getTpPct().doubleValue();
+        // V33: 실시간 TP_TRAIL + 티어드 SL 캐시 등록 [avgPrice, peakPrice, activated, openedAtMs]
+        positionCache.put(symbol, new double[]{fillPrice, fillPrice, 0, System.currentTimeMillis()});
+        cachedTpTrailActivatePct = cfg.getTpTrailActivatePct().doubleValue();
+        cachedTpTrailDropPct = cfg.getTpTrailDropPct().doubleValue();
         cachedSlPct = cfg.getSlPct().doubleValue();
+        cachedWideSlPct = cfg.getWideSlPct().doubleValue();
+        cachedGracePeriodMs = cfg.getGracePeriodSec() * 1000L;
+        cachedWidePeriodMs = cfg.getWidePeriodMin() * 60_000L;
 
         log.info("[KrxMorningRush] BUY {} mode={} price={} qty={}", symbol, cfg.getMode(), fillPrice, qty);
     }
@@ -1080,11 +1081,21 @@ public class KrxMorningRushService {
         return sum;
     }
 
-    // ========== WebSocket 실시간 TP/SL ==========
+    // ========== WebSocket 실시간 TP_TRAIL + 티어드 SL (V33) ==========
 
     /**
-     * WebSocket 가격 수신 시 즉시 TP/SL 체크 (DB 접근 없음, 메모리 캐시만 사용).
-     * TP/SL 도달 시 tpSlExecutor에서 매도 실행.
+     * V33: TP_TRAIL + 티어드 SL 통합 실시간 체크 (코인봇 올데이 구조 동일).
+     *
+     * TP_TRAIL 활성화 후 (수익 +3% 도달한 적 있음):
+     *   → TP_TRAIL 단독 관리 (피크 추적, 피크 대비 -1.5% drop 시 매도)
+     *   → SL 비활성
+     *
+     * TP_TRAIL 미활성:
+     *   Phase 1 Grace (0~30초):   SL 무시
+     *   Phase 2 Wide  (30초~10분): SL_WIDE -3%
+     *   Phase 3 Tight (10분~):     SL_TIGHT -3%
+     *
+     * positionCache: [avgPrice, peakPrice, trailActivated(0/1), openedAtEpochMs]
      */
     private void checkRealtimeTpSl(final String symbol, final double price) {
         if (!running.get()) return;
@@ -1094,19 +1105,70 @@ public class KrxMorningRushService {
 
         double avgPrice = pos[0];
         if (avgPrice <= 0) return;
+        double peakPrice = pos[1];
+        boolean activated = pos[2] > 0;
+        long openedAtMs = pos.length >= 4 ? (long) pos[3] : 0;
 
         double pnlPct = (price - avgPrice) / avgPrice * 100.0;
+        long elapsedMs = openedAtMs > 0 ? System.currentTimeMillis() - openedAtMs : Long.MAX_VALUE;
 
-        if (pnlPct >= cachedTpPct || pnlPct <= -cachedSlPct) {
-            final String sellType = pnlPct >= cachedTpPct ? "TP" : "SL";
-            final String reason = String.format(java.util.Locale.ROOT,
-                    "%s pnl=%.2f%% price=%.0f avg=%.0f (realtime)",
-                    sellType, pnlPct, price, avgPrice);
+        // 피크 업데이트
+        if (price > peakPrice) {
+            pos[1] = price;
+            peakPrice = price;
+        }
 
-            // 중복 방지: 캐시에서 즉시 제거
+        String sellType = null;
+        String reason = null;
+
+        // TP_TRAIL 활성화 체크
+        if (!activated && pnlPct >= cachedTpTrailActivatePct) {
+            pos[2] = 1.0;
+            activated = true;
+            log.info("[KrxMorningRush] TP_TRAIL activated: {} pnl=+{} peak={} (realtime)",
+                    symbol, String.format(java.util.Locale.ROOT, "%.2f%%", pnlPct), price);
+        }
+
+        // 분기: TP_TRAIL 활성 vs 티어드 SL
+        if (activated) {
+            double dropFromPeak = (peakPrice - price) / peakPrice * 100.0;
+            if (dropFromPeak >= cachedTpTrailDropPct) {
+                sellType = "TP_TRAIL";
+                reason = String.format(java.util.Locale.ROOT,
+                        "TP_TRAIL avg=%.0f peak=%.0f now=%.0f drop=%.2f%% pnl=%.2f%% (realtime)",
+                        avgPrice, peakPrice, price, dropFromPeak, pnlPct);
+            }
+        } else {
+            if (elapsedMs < cachedGracePeriodMs) {
+                // Grace: SL 무시 (비상 -10%만)
+                if (pnlPct <= -10.0) {
+                    sellType = "SL_EMERGENCY";
+                    reason = String.format(java.util.Locale.ROOT,
+                            "SL_EMERGENCY pnl=%.2f%% price=%.0f avg=%.0f (grace, realtime)", pnlPct, price, avgPrice);
+                }
+            } else if (elapsedMs < cachedWidePeriodMs) {
+                if (pnlPct <= -cachedWideSlPct) {
+                    sellType = "SL_WIDE";
+                    reason = String.format(java.util.Locale.ROOT,
+                            "SL_WIDE pnl=%.2f%% <= -%.2f%% price=%.0f avg=%.0f (realtime)",
+                            pnlPct, cachedWideSlPct, price, avgPrice);
+                }
+            } else {
+                if (pnlPct <= -cachedSlPct) {
+                    sellType = "SL_TIGHT";
+                    reason = String.format(java.util.Locale.ROOT,
+                            "SL_TIGHT pnl=%.2f%% <= -%.2f%% price=%.0f avg=%.0f (realtime)",
+                            pnlPct, cachedSlPct, price, avgPrice);
+                }
+            }
+        }
+
+        if (sellType != null) {
             if (positionCache.remove(symbol) == null) return;
 
-            log.info("[KrxMorningRush] realtime {} detected | {} | {}", sellType, symbol, reason);
+            final String fSellType = sellType;
+            final String fReason = reason;
+            log.info("[KrxMorningRush] realtime {} detected | {} | {}", fSellType, symbol, fReason);
 
             tpSlExecutor.submit(new Runnable() {
                 @Override
@@ -1116,7 +1178,7 @@ public class KrxMorningRushService {
                         if (fresh == null || fresh.getQty() <= 0) return;
                         if (!ENTRY_STRATEGY.equals(fresh.getEntryStrategy())) return;
                         KrxMorningRushConfigEntity cfg = configRepo.loadOrCreate();
-                        executeSell(fresh, price, Signal.of(SignalAction.SELL, null, reason), cfg);
+                        executeSell(fresh, price, Signal.of(SignalAction.SELL, null, fReason), cfg);
                     } catch (Exception e) {
                         log.error("[KrxMorningRush] realtime sell failed for {}", symbol, e);
                     }
@@ -1129,15 +1191,22 @@ public class KrxMorningRushService {
      * mainLoop에서 호출: 포지션 캐시 + TP/SL 캐시 업데이트.
      */
     private void updateRealtimeCache(KrxMorningRushConfigEntity cfg) {
-        cachedTpPct = cfg.getTpPct().doubleValue();
+        // V33: TP_TRAIL + 티어드 SL cached 변수 갱신
+        cachedTpTrailActivatePct = cfg.getTpTrailActivatePct().doubleValue();
+        cachedTpTrailDropPct = cfg.getTpTrailDropPct().doubleValue();
         cachedSlPct = cfg.getSlPct().doubleValue();
+        cachedWideSlPct = cfg.getWideSlPct().doubleValue();
+        cachedGracePeriodMs = cfg.getGracePeriodSec() * 1000L;
+        cachedWidePeriodMs = cfg.getWidePeriodMin() * 60_000L;
 
         Set<String> current = new java.util.HashSet<String>();
         for (PositionEntity pe : positionRepo.findAll()) {
             if (ENTRY_STRATEGY.equals(pe.getEntryStrategy()) && pe.getQty() > 0) {
                 current.add(pe.getSymbol());
                 if (!positionCache.containsKey(pe.getSymbol())) {
-                    positionCache.put(pe.getSymbol(), new double[]{pe.getAvgPrice().doubleValue()});
+                    double avg = pe.getAvgPrice().doubleValue();
+                    long openedAt = pe.getOpenedAt() != null ? pe.getOpenedAt().toEpochMilli() : System.currentTimeMillis();
+                    positionCache.put(pe.getSymbol(), new double[]{avg, avg, 0, openedAt});
                 }
             }
         }
