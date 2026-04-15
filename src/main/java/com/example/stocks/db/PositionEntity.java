@@ -36,6 +36,13 @@ public class PositionEntity {
     @Column(name = "scanner_source", length = 30)
     private String scannerSource = "MAIN";
 
+    // V34: Split-Exit 분할 익절 지원
+    @Column(name = "split_phase")
+    private int splitPhase = 0;   // 0=미분할, 1=1차매도완료(잔량보유)
+
+    @Column(name = "split_original_qty")
+    private int splitOriginalQty = 0;  // 분할 전 원래 수량
+
     // --- Getters & Setters ---
 
     public String getSymbol() { return symbol; }
@@ -65,4 +72,10 @@ public class PositionEntity {
 
     public String getScannerSource() { return scannerSource != null ? scannerSource : "MAIN"; }
     public void setScannerSource(String scannerSource) { this.scannerSource = scannerSource != null ? scannerSource : "MAIN"; }
+
+    public int getSplitPhase() { return splitPhase; }
+    public void setSplitPhase(int splitPhase) { this.splitPhase = splitPhase; }
+
+    public int getSplitOriginalQty() { return splitOriginalQty; }
+    public void setSplitOriginalQty(int splitOriginalQty) { this.splitOriginalQty = splitOriginalQty; }
 }

@@ -79,6 +79,17 @@ public class KrxMorningRushApiController {
         if (body.containsKey("minTradeAmount")) cfg.setMinTradeAmount(toLong(body.get("minTradeAmount"), 1000000000L));
         if (body.containsKey("excludeSymbols")) cfg.setExcludeSymbols(String.valueOf(body.get("excludeSymbols")));
         if (body.containsKey("minPriceKrw")) cfg.setMinPriceKrw(toInt(body.get("minPriceKrw"), 1000));
+        // V33: TP_TRAIL + 티어드 SL
+        if (body.containsKey("tpTrailActivatePct")) cfg.setTpTrailActivatePct(toBD(body.get("tpTrailActivatePct")));
+        if (body.containsKey("tpTrailDropPct")) cfg.setTpTrailDropPct(toBD(body.get("tpTrailDropPct")));
+        if (body.containsKey("gracePeriodSec")) cfg.setGracePeriodSec(toInt(body.get("gracePeriodSec"), 30));
+        if (body.containsKey("wideSlPct")) cfg.setWideSlPct(toBD(body.get("wideSlPct")));
+        if (body.containsKey("widePeriodMin")) cfg.setWidePeriodMin(toInt(body.get("widePeriodMin"), 10));
+        // V34: Split-Exit
+        if (body.containsKey("splitExitEnabled")) cfg.setSplitExitEnabled(Boolean.TRUE.equals(body.get("splitExitEnabled")));
+        if (body.containsKey("splitTpPct")) cfg.setSplitTpPct(toBD(body.get("splitTpPct")));
+        if (body.containsKey("splitRatio")) cfg.setSplitRatio(toBD(body.get("splitRatio")));
+        if (body.containsKey("trailDropAfterSplit")) cfg.setTrailDropAfterSplit(toBD(body.get("trailDropAfterSplit")));
         configRepo.save(cfg);
         return ResponseEntity.ok(configToMap(cfg));
     }
@@ -88,6 +99,7 @@ public class KrxMorningRushApiController {
             @RequestParam(defaultValue = "50") int limit) {
         return ResponseEntity.ok(scannerService.getRecentDecisions(Math.min(limit, 200)));
     }
+
 
     private Map<String, Object> buildStatus() {
         Map<String, Object> m = new LinkedHashMap<String, Object>();
@@ -125,6 +137,17 @@ public class KrxMorningRushApiController {
         m.put("minTradeAmount", cfg.getMinTradeAmount());
         m.put("excludeSymbols", cfg.getExcludeSymbols());
         m.put("minPriceKrw", cfg.getMinPriceKrw());
+        // V33: TP_TRAIL + 티어드 SL
+        m.put("tpTrailActivatePct", cfg.getTpTrailActivatePct());
+        m.put("tpTrailDropPct", cfg.getTpTrailDropPct());
+        m.put("gracePeriodSec", cfg.getGracePeriodSec());
+        m.put("wideSlPct", cfg.getWideSlPct());
+        m.put("widePeriodMin", cfg.getWidePeriodMin());
+        // V34: Split-Exit
+        m.put("splitExitEnabled", cfg.isSplitExitEnabled());
+        m.put("splitTpPct", cfg.getSplitTpPct());
+        m.put("splitRatio", cfg.getSplitRatio());
+        m.put("trailDropAfterSplit", cfg.getTrailDropAfterSplit());
         return m;
     }
 

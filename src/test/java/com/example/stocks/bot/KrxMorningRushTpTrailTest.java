@@ -33,9 +33,9 @@ import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
 /**
- * V33: 주식봇 TP_TRAIL + 티어드 SL 테스트.
+ * V33→V34: 주식봇 TP_TRAIL + 티어드 SL 테스트.
  *
- * positionCache: [avgPrice, peakPrice, trailActivated(0/1), openedAtEpochMs]
+ * positionCache: [avgPrice, peakPrice, trailActivated(0/1), openedAtEpochMs, splitPhase]
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -64,13 +64,18 @@ public class KrxMorningRushTpTrailTest {
                 exchangeAdapter, kisPublic, overtimeRankRepo
         );
         setField("running", new AtomicBoolean(true));
-        // 기본 cached 값 설정
-        setField("cachedTpTrailActivatePct", 3.0);
+        // V34 기본 cached 값 설정
+        setField("cachedTpTrailActivatePct", 3.0);  // 이 테스트는 3.0% 기준으로 작성됨
         setField("cachedTpTrailDropPct", 1.5);
-        setField("cachedSlPct", 3.0);
+        setField("cachedSlPct", 3.0);   // 이 테스트는 3.0% 기준으로 작성됨
         setField("cachedWideSlPct", 3.0);
         setField("cachedGracePeriodMs", 30_000L);
         setField("cachedWidePeriodMs", 10 * 60_000L);
+        // V34: Split-Exit 비활성 (이 테스트는 TP_TRAIL/SL 전용)
+        setField("cachedSplitExitEnabled", false);
+
+        // configRepo mock (executeSell에서 cfg.getMode() 호출 시 NPE 방지)
+        when(configRepo.loadOrCreate()).thenReturn(buildConfig());
 
         when(txTemplate.execute(any())).thenAnswer(new Answer<Object>() {
             @Override
@@ -120,9 +125,12 @@ public class KrxMorningRushTpTrailTest {
     public void tpTrailActiveThenSlDisabled() throws Exception {
         // trail 활성화 상태에서 큰 하락
         putPositionWithPeak("NOSL", 10000, 10500, true, System.currentTimeMillis() - 600_000);
+        when(positionRepo.findById("NOSL")).thenReturn(Optional.of(buildPos("NOSL", 10000)));
         invoke("NOSL", 9700);  // -3% but trail 활성 → peak 10500에서 -7.6% drop → TP_TRAIL 매도 (SL 아님)
+        Thread.sleep(300);
         // peak에서 drop이 1.5% 초과이므로 TP_TRAIL로 매도됨 (SL 아님)
         // 핵심: SL_TIGHT가 아닌 TP_TRAIL로 매도
+        assertFalse(getCache().containsKey("NOSL"), "TP_TRAIL로 매도 (SL 아님)");
     }
 
     // ═══ 티어드 SL 테스트 ═══
@@ -188,12 +196,12 @@ public class KrxMorningRushTpTrailTest {
     // ═══ Helpers ═══
 
     private void putPosition(String symbol, double avgPrice, long openedAtMs) throws Exception {
-        getCache().put(symbol, new double[]{avgPrice, avgPrice, 0, openedAtMs});
+        getCache().put(symbol, new double[]{avgPrice, avgPrice, 0, openedAtMs, 0});
     }
 
     private void putPositionWithPeak(String symbol, double avgPrice, double peak,
                                       boolean activated, long openedAtMs) throws Exception {
-        getCache().put(symbol, new double[]{avgPrice, peak, activated ? 1.0 : 0, openedAtMs});
+        getCache().put(symbol, new double[]{avgPrice, peak, activated ? 1.0 : 0, openedAtMs, 0});
     }
 
     @SuppressWarnings("unchecked")
@@ -223,5 +231,18 @@ public class KrxMorningRushTpTrailTest {
         pe.setAvgPrice(avgPrice);
         pe.setEntryStrategy("KRX_MORNING_RUSH");
         return pe;
+    }
+
+    private KrxMorningRushConfigEntity buildConfig() {
+        KrxMorningRushConfigEntity cfg = new KrxMorningRushConfigEntity();
+        cfg.setMode("PAPER");
+        cfg.setSplitExitEnabled(false);
+        cfg.setTpTrailActivatePct(java.math.BigDecimal.valueOf(3.0));
+        cfg.setTpTrailDropPct(java.math.BigDecimal.valueOf(1.5));
+        cfg.setSlPct(java.math.BigDecimal.valueOf(3.0));
+        cfg.setWideSlPct(java.math.BigDecimal.valueOf(3.0));
+        cfg.setGracePeriodSec(30);
+        cfg.setWidePeriodMin(10);
+        return cfg;
     }
 }

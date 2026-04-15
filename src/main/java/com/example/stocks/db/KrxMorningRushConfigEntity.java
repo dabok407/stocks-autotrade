@@ -53,7 +53,7 @@ public class KrxMorningRushConfigEntity {
     private BigDecimal tpPct = BigDecimal.valueOf(3.0);
 
     @Column(name = "sl_pct", nullable = false, precision = 5, scale = 2)
-    private BigDecimal slPct = BigDecimal.valueOf(3.0);
+    private BigDecimal slPct = BigDecimal.valueOf(2.0);
 
     @Column(name = "entry_delay_sec", nullable = false)
     private int entryDelaySec = 30;
@@ -83,7 +83,7 @@ public class KrxMorningRushConfigEntity {
 
     // ── V33: TP_TRAIL + 티어드 SL (코인봇 구조 동일) ──
     @Column(name = "tp_trail_activate_pct", nullable = false, precision = 5, scale = 2)
-    private BigDecimal tpTrailActivatePct = BigDecimal.valueOf(3.0);
+    private BigDecimal tpTrailActivatePct = BigDecimal.valueOf(2.1);
 
     @Column(name = "tp_trail_drop_pct", nullable = false, precision = 5, scale = 2)
     private BigDecimal tpTrailDropPct = BigDecimal.valueOf(1.5);
@@ -92,10 +92,23 @@ public class KrxMorningRushConfigEntity {
     private int gracePeriodSec = 30;
 
     @Column(name = "wide_sl_pct", nullable = false, precision = 5, scale = 2)
-    private BigDecimal wideSlPct = BigDecimal.valueOf(3.0);
+    private BigDecimal wideSlPct = BigDecimal.valueOf(2.0);
 
     @Column(name = "wide_period_min", nullable = false)
     private int widePeriodMin = 10;
+
+    // ── V34: Split-Exit 분할 익절 (코인봇 동일 구조) ──
+    @Column(name = "split_exit_enabled", nullable = false)
+    private boolean splitExitEnabled = true;
+
+    @Column(name = "split_tp_pct", nullable = false, precision = 5, scale = 2)
+    private BigDecimal splitTpPct = BigDecimal.valueOf(1.6);
+
+    @Column(name = "split_ratio", nullable = false, precision = 5, scale = 2)
+    private BigDecimal splitRatio = BigDecimal.valueOf(0.60);
+
+    @Column(name = "trail_drop_after_split", nullable = false, precision = 5, scale = 2)
+    private BigDecimal trailDropAfterSplit = BigDecimal.valueOf(1.5);
 
     // ========== Getters & Setters ==========
 
@@ -175,6 +188,18 @@ public class KrxMorningRushConfigEntity {
 
     public int getWidePeriodMin() { return widePeriodMin; }
     public void setWidePeriodMin(int v) { this.widePeriodMin = Math.max(1, v); }
+
+    public boolean isSplitExitEnabled() { return splitExitEnabled; }
+    public void setSplitExitEnabled(boolean v) { this.splitExitEnabled = v; }
+
+    public BigDecimal getSplitTpPct() { return splitTpPct; }
+    public void setSplitTpPct(BigDecimal v) { this.splitTpPct = v != null ? v : BigDecimal.valueOf(1.6); }
+
+    public BigDecimal getSplitRatio() { return splitRatio; }
+    public void setSplitRatio(BigDecimal v) { this.splitRatio = v != null ? v : BigDecimal.valueOf(0.60); }
+
+    public BigDecimal getTrailDropAfterSplit() { return trailDropAfterSplit; }
+    public void setTrailDropAfterSplit(BigDecimal v) { this.trailDropAfterSplit = v != null ? v : BigDecimal.valueOf(1.5); }
 
     /** Excluded symbols as Set (CSV parsed) */
     public Set<String> getExcludeSymbolsSet() {

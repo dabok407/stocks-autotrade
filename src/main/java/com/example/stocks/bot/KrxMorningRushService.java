@@ -79,16 +79,23 @@ public class KrxMorningRushService {
                     return t;
                 }
             });
-    // V33: positionCache [avgPrice, peakPrice, trailActivated(0/1), openedAtEpochMs]
+    // V34: positionCache [avgPrice, peakPrice, trailActivated(0/1), openedAtEpochMs, splitPhase]
     private final ConcurrentHashMap<String, double[]> positionCache = new ConcurrentHashMap<String, double[]>();
-    // V33: TP_TRAIL + 티어드 SL cached 변수 (DB에서 갱신)
-    private volatile double cachedTpTrailActivatePct = 3.0;
+    // V34: TP_TRAIL + 티어드 SL + Split-Exit cached 변수 (DB에서 갱신)
+    private volatile double cachedTpTrailActivatePct = 2.1;
     private volatile double cachedTpTrailDropPct = 1.5;
-    private volatile double cachedSlPct = 3.0;        // Tight SL (wide_period 이후)
-    private volatile double cachedWideSlPct = 3.0;    // Wide SL (grace 후 ~ wide_period)
+    private volatile double cachedSlPct = 2.0;        // Tight SL (wide_period 이후)
+    private volatile double cachedWideSlPct = 2.0;    // Wide SL (grace 후 ~ wide_period)
     private volatile long cachedGracePeriodMs = 30_000L;
     private volatile long cachedWidePeriodMs = 10 * 60_000L;
+    // V34: Split-Exit cached 변수
+    private volatile boolean cachedSplitExitEnabled = true;
+    private volatile double cachedSplitTpPct = 1.6;
+    private volatile double cachedSplitRatio = 0.60;
+    private volatile double cachedTrailDropAfterSplit = 1.5;
     private volatile KisWebSocketClient.PriceListener wsListener;
+    // V34: race condition 방어 (WS + REST 동시 매도 방지)
+    private final Set<String> sellingSymbols = ConcurrentHashMap.newKeySet();
 
     // ── 상태 머신 (V109: 시간 빈틈 버그 근본 해결) ──
     // 기존 boolean 플래그(rangeCollected, entryPhaseComplete) → Phase enum 전환
@@ -818,13 +825,34 @@ public class KrxMorningRushService {
     // ========== Position Monitoring (TP/SL/TimeStop) ==========
 
     /**
-     * V33: REST 폴링 기반 TP/SL 모니터링 (WebSocket 실시간의 백업).
+     * V34: REST 폴링 기반 TP/SL 모니터링 (WebSocket 실시간의 백업).
      * WebSocket이 끊기거나 지연될 때를 대비한 안전장치.
+     * Split-Exit + TP_TRAIL + 티어드 SL 통합 (checkRealtimeTpSl과 동일 우선순위).
+     *
+     * 우선순위:
+     * 1. Split-Exit (splitExitEnabled)
+     *    · splitPhase=0 + pnl >= splitTpPct → SPLIT_1ST
+     *    · splitPhase=1 → breakeven(SPLIT_2ND_BEV) 또는 trail drop(SPLIT_2ND_TRAIL)
+     * 2. TP_TRAIL (splitExit 비활성 시)
+     *    · 수익 +tpTrailActivatePct 도달 → trail 활성, peak 대비 drop 시 매도
+     * 3. 티어드 SL (TP_TRAIL 미발동 시)
+     *    · Grace → Wide → Tight
+     * 4. TIME_STOP
      */
     private void monitorPositions(KrxMorningRushConfigEntity cfg) {
         List<PositionEntity> allPos = positionRepo.findAll();
-        double slPct = cfg.getSlPct().doubleValue() / 100.0;
         int timeStopMin = cfg.getTimeStopMin();
+
+        // 파라미터 (realtime checkRealtimeTpSl과 동일)
+        long gracePeriodMs = cfg.getGracePeriodSec() * 1000L;
+        long widePeriodMs = cfg.getWidePeriodMin() * 60_000L;
+        double wideSlPct = cfg.getWideSlPct().doubleValue();
+        double tightSlPct = cfg.getSlPct().doubleValue();
+        double tpTrailActivatePct = cfg.getTpTrailActivatePct().doubleValue();
+        double tpTrailDropPct = cfg.getTpTrailDropPct().doubleValue();
+        boolean splitExitEnabled = cfg.isSplitExitEnabled();
+        double splitTpPct = cfg.getSplitTpPct().doubleValue();
+        double trailDropAfterSplit = cfg.getTrailDropAfterSplit().doubleValue();
 
         for (PositionEntity pe : allPos) {
             if (!ENTRY_STRATEGY.equals(pe.getEntryStrategy()) || pe.getQty() <= 0) continue;
@@ -832,10 +860,11 @@ public class KrxMorningRushService {
             double avgPrice = pe.getAvgPrice().doubleValue();
             if (avgPrice <= 0) continue;
 
-            double currentPrice = kisWs.getLatestPrice(pe.getSymbol());
+            String symbol = pe.getSymbol();
+            double currentPrice = kisWs.getLatestPrice(symbol);
             if (currentPrice <= 0) {
                 try {
-                    StockCandle ticker = tickerService.getCurrentPrice(pe.getSymbol(), MarketType.KRX);
+                    StockCandle ticker = tickerService.getCurrentPrice(symbol, MarketType.KRX);
                     if (ticker != null && ticker.trade_price > 0) {
                         currentPrice = ticker.trade_price;
                     }
@@ -845,34 +874,142 @@ public class KrxMorningRushService {
             }
             if (currentPrice <= 0) continue;
 
-            double pnlPct = (currentPrice - avgPrice) / avgPrice;
+            double pnlPct = (currentPrice - avgPrice) / avgPrice * 100.0;
 
-            long elapsedMinTotal = pe.getOpenedAt() != null
-                    ? Duration.between(pe.getOpenedAt(), Instant.now()).toMinutes() : 0;
-            addDecision(pe.getSymbol(), "MONITOR", "CHECK", "POS_STATUS",
-                    String.format(Locale.ROOT, "price=%.0f avg=%.0f pnl=%.2f%% elapsed=%dmin",
-                            currentPrice, avgPrice, pnlPct * 100, elapsedMinTotal));
+            long openedAtMs = pe.getOpenedAt() != null
+                    ? pe.getOpenedAt().toEpochMilli() : System.currentTimeMillis();
+            long elapsedMs = System.currentTimeMillis() - openedAtMs;
+            long elapsedMinTotal = elapsedMs / 60_000L;
 
-            // SL (REST 백업 — 실시간에서 놓칠 경우)
-            if (pnlPct <= -slPct) {
-                String reason = String.format(Locale.ROOT,
-                        "SL hit: pnl=%.2f%% <= sl=-%.2f%% price=%.0f avg=%.0f (REST backup)",
-                        pnlPct * 100, slPct * 100, currentPrice, avgPrice);
-                executeSell(pe, currentPrice, Signal.of(SignalAction.SELL, null, reason), cfg);
-                addDecision(pe.getSymbol(), "SELL", "EXECUTED", "SL", reason);
+            // positionCache에서 peak/trail 상태 읽기
+            double[] cached = positionCache.get(symbol);
+            double peakPrice = cached != null ? cached[1] : avgPrice;
+            boolean trailActivated = cached != null && cached[2] > 0;
+            int splitPhase = pe.getSplitPhase();
+
+            // peak 업데이트 (REST에서도)
+            if (currentPrice > peakPrice) {
+                peakPrice = currentPrice;
+                if (cached != null) cached[1] = currentPrice;
+            }
+
+            addDecision(symbol, "MONITOR", "CHECK", "POS_STATUS",
+                    String.format(Locale.ROOT, "price=%.0f avg=%.0f pnl=%.2f%% elapsed=%dmin split=%d trail=%s",
+                            currentPrice, avgPrice, pnlPct, elapsedMinTotal, splitPhase, trailActivated));
+
+            String sellReason = null;
+            String sellType = null;
+            boolean isSplitFirst = false;
+
+            // ━━━ V34: Split-Exit 1차 매도 (REST 백업) ━━━
+            if (splitExitEnabled && splitPhase == 0 && pnlPct >= splitTpPct) {
+                sellType = "SPLIT_1ST";
+                isSplitFirst = true;
+                sellReason = String.format(Locale.ROOT,
+                        "SPLIT_1ST pnl=+%.2f%% >= %.2f%% avg=%.0f now=%.0f (REST backup)",
+                        pnlPct, splitTpPct, avgPrice, currentPrice);
+            }
+            // ━━━ V34: Split 2차 관리 (REST 백업) ━━━
+            else if (splitExitEnabled && splitPhase == 1) {
+                if (pnlPct <= 0) {
+                    sellType = "SPLIT_2ND_BEV";
+                    sellReason = String.format(Locale.ROOT,
+                            "SPLIT_2ND_BEV pnl=%.2f%% <= 0%% avg=%.0f now=%.0f (REST backup)",
+                            pnlPct, avgPrice, currentPrice);
+                } else if (peakPrice > avgPrice) {
+                    double dropFromPeakPct = (peakPrice - currentPrice) / peakPrice * 100.0;
+                    if (dropFromPeakPct >= trailDropAfterSplit) {
+                        sellType = "SPLIT_2ND_TRAIL";
+                        sellReason = String.format(Locale.ROOT,
+                                "SPLIT_2ND_TRAIL peak=%.0f now=%.0f drop=%.2f%% >= %.2f%% (REST backup)",
+                                peakPrice, currentPrice, dropFromPeakPct, trailDropAfterSplit);
+                    }
+                }
+            }
+            // ━━━ TP_TRAIL + 티어드 SL (splitExit 비활성 시, REST 백업) ━━━
+            else {
+                // TP_TRAIL 활성화 체크
+                if (!trailActivated && pnlPct >= tpTrailActivatePct) {
+                    trailActivated = true;
+                    if (cached != null) cached[2] = 1.0;
+                    log.info("[KrxMorningRush] TP_TRAIL activated: {} pnl=+{}% peak={} (REST backup)",
+                            symbol, String.format(Locale.ROOT, "%.2f", pnlPct), currentPrice);
+                }
+
+                // TP_TRAIL 매도 체크
+                if (trailActivated) {
+                    double dropFromPeak = (peakPrice - currentPrice) / peakPrice * 100.0;
+                    if (dropFromPeak >= tpTrailDropPct) {
+                        sellType = "TP_TRAIL";
+                        sellReason = String.format(Locale.ROOT,
+                                "TP_TRAIL peak=%.0f now=%.0f drop=%.2f%% pnl=%.2f%% (REST backup)",
+                                peakPrice, currentPrice, dropFromPeak, pnlPct);
+                    }
+                }
+
+                // 티어드 SL (TP_TRAIL 미발동 시)
+                if (sellReason == null) {
+                    if (elapsedMs < gracePeriodMs) {
+                        if (pnlPct <= -10.0) {
+                            sellType = "SL_EMERGENCY";
+                            sellReason = String.format(Locale.ROOT,
+                                    "SL_EMERGENCY pnl=%.2f%% price=%.0f avg=%.0f (grace, REST backup)",
+                                    pnlPct, currentPrice, avgPrice);
+                        }
+                    } else if (elapsedMs < widePeriodMs) {
+                        if (pnlPct <= -wideSlPct) {
+                            sellType = "SL_WIDE";
+                            sellReason = String.format(Locale.ROOT,
+                                    "SL_WIDE pnl=%.2f%% <= -%.2f%% price=%.0f avg=%.0f elapsed=%ds (REST backup)",
+                                    pnlPct, wideSlPct, currentPrice, avgPrice, elapsedMs / 1000);
+                        }
+                    } else {
+                        if (pnlPct <= -tightSlPct) {
+                            sellType = "SL_TIGHT";
+                            sellReason = String.format(Locale.ROOT,
+                                    "SL_TIGHT pnl=%.2f%% <= -%.2f%% price=%.0f avg=%.0f elapsed=%ds (REST backup)",
+                                    pnlPct, tightSlPct, currentPrice, avgPrice, elapsedMs / 1000);
+                        }
+                    }
+                }
+            }
+
+            // Time stop (SL 미발동 시)
+            if (sellReason == null && pe.getOpenedAt() != null && timeStopMin > 0) {
+                if (elapsedMinTotal >= timeStopMin && pnlPct < 0) {
+                    sellType = "TIME_STOP";
+                    sellReason = String.format(Locale.ROOT,
+                            "TIME_STOP: %dmin elapsed (limit=%d), pnl=%.2f%% price=%.0f",
+                            elapsedMinTotal, timeStopMin, pnlPct, currentPrice);
+                }
+            }
+
+            if (sellReason == null) continue;
+
+            // race 방어: WS realtime과 REST monitorPositions 동시 매도 방지
+            if (!sellingSymbols.add(symbol)) {
+                log.debug("[KrxMorningRush] REST SELL skip, already in progress: {}", symbol);
                 continue;
             }
 
-            // Time stop
-            if (pe.getOpenedAt() != null && timeStopMin > 0) {
-                long elapsedMin = Duration.between(pe.getOpenedAt(), Instant.now()).toMinutes();
-                if (elapsedMin >= timeStopMin && pnlPct < 0) {
-                    String reason = String.format(Locale.ROOT,
-                            "TIME_STOP: %dmin elapsed (limit=%d), pnl=%.2f%% price=%.0f",
-                            elapsedMin, timeStopMin, pnlPct * 100, currentPrice);
-                    executeSell(pe, currentPrice, Signal.of(SignalAction.SELL, null, reason), cfg);
-                    addDecision(pe.getSymbol(), "SELL", "EXECUTED", "TIME_STOP", reason);
+            log.info("[KrxMorningRush] {} triggered | {} | {}", sellType, symbol, sellReason);
+
+            try {
+                PositionEntity fresh = positionRepo.findById(symbol).orElse(null);
+                if (fresh == null || fresh.getQty() <= 0) continue;
+
+                if (isSplitFirst) {
+                    executeSplitFirstSell(fresh, currentPrice, sellReason, cfg);
+                } else {
+                    positionCache.remove(symbol);
+                    executeSell(fresh, currentPrice, Signal.of(SignalAction.SELL, null, sellReason), cfg);
                 }
+                addDecision(symbol, "SELL", "EXECUTED", sellType, sellReason);
+            } catch (Exception e) {
+                log.error("[KrxMorningRush] REST sell failed for {}", symbol, e);
+                addDecision(symbol, "SELL", "ERROR", "SELL_FAIL", "REST 매도 실행 오류: " + e.getMessage());
+            } finally {
+                sellingSymbols.remove(symbol);
             }
         }
     }
@@ -898,10 +1035,14 @@ public class KrxMorningRushService {
             }
             if (currentPrice <= 0) continue;
 
-            String reason = "SESSION_END: KRX morning rush session closing";
+            // V34: splitPhase=1이면 SPLIT_SESSION_END note 구분
+            String reason = pe.getSplitPhase() == 1
+                    ? "SPLIT_SESSION_END: 2차 잔량 세션 종료 청산"
+                    : "SESSION_END: KRX morning rush session closing";
             executeSell(pe, currentPrice, Signal.of(SignalAction.SELL, null, reason), cfg);
             addDecision(pe.getSymbol(), "SELL", "EXECUTED", "SESSION_END", reason);
         }
+        positionCache.clear();
     }
 
     // ========== Order Execution ==========
@@ -980,14 +1121,19 @@ public class KrxMorningRushService {
             }
         });
 
-        // V33: 실시간 TP_TRAIL + 티어드 SL 캐시 등록 [avgPrice, peakPrice, activated, openedAtMs]
-        positionCache.put(symbol, new double[]{fillPrice, fillPrice, 0, System.currentTimeMillis()});
+        // V34: 실시간 TP_TRAIL + 티어드 SL + Split-Exit 캐시 등록
+        // [avgPrice, peakPrice, activated, openedAtMs, splitPhase]
+        positionCache.put(symbol, new double[]{fillPrice, fillPrice, 0, System.currentTimeMillis(), 0});
         cachedTpTrailActivatePct = cfg.getTpTrailActivatePct().doubleValue();
         cachedTpTrailDropPct = cfg.getTpTrailDropPct().doubleValue();
         cachedSlPct = cfg.getSlPct().doubleValue();
         cachedWideSlPct = cfg.getWideSlPct().doubleValue();
         cachedGracePeriodMs = cfg.getGracePeriodSec() * 1000L;
         cachedWidePeriodMs = cfg.getWidePeriodMin() * 60_000L;
+        cachedSplitExitEnabled = cfg.isSplitExitEnabled();
+        cachedSplitTpPct = cfg.getSplitTpPct().doubleValue();
+        cachedSplitRatio = cfg.getSplitRatio().doubleValue();
+        cachedTrailDropAfterSplit = cfg.getTrailDropAfterSplit().doubleValue();
 
         log.info("[KrxMorningRush] BUY {} mode={} price={} qty={}", symbol, cfg.getMode(), fillPrice, qty);
         return true;
@@ -1058,6 +1204,134 @@ public class KrxMorningRushService {
                 String.format("%.2f", roiPct), signalReason);
     }
 
+    // ========== V34: Split-Exit 1차 분할 매도 ==========
+
+    /**
+     * Split-Exit 1차 매도: 전체 수량의 ratio(60%) 매도, 나머지 보유.
+     * 코인봇 executeSplitFirstSell과 동일 구조.
+     *
+     * Dust 처리: 잔량 * 가격 < 50,000원이면 전량 매도.
+     * DB 실패 시: cache rollback (splitPhase=0으로 복원).
+     */
+    private void executeSplitFirstSell(final PositionEntity pe, double price, String reason,
+                                        final KrxMorningRushConfigEntity cfg) {
+        final String symbol = pe.getSymbol();
+        if (pe.getSplitPhase() != 0) {
+            log.debug("[KrxMorningRush] SPLIT_1ST: already split for {} phase={}", symbol, pe.getSplitPhase());
+            return;
+        }
+
+        int totalQty = pe.getQty();
+        double avgPrice = pe.getAvgPrice().doubleValue();
+        double sellRatio = cfg.getSplitRatio().doubleValue();
+        int sellQty = (int) Math.round(totalQty * sellRatio);
+        if (sellQty <= 0) sellQty = 1;
+        if (sellQty >= totalQty) sellQty = totalQty - 1;
+        int remainQty = totalQty - sellQty;
+
+        // Dust 체크: 잔량 가치 < 50,000원이면 전량 매도
+        boolean isDust = remainQty <= 0 || remainQty * price < 50000;
+        int actualSellQty = isDust ? totalQty : sellQty;
+
+        boolean isPaper = "PAPER".equalsIgnoreCase(cfg.getMode());
+        final double fillPrice;
+
+        if (isPaper) {
+            fillPrice = price * 0.999; // 0.1% slippage
+        } else {
+            if (!liveOrders.isConfigured()) {
+                addDecision(symbol, "SELL", "BLOCKED", "SPLIT_1ST", "LIVE 모드 API 키 미설정");
+                return;
+            }
+            try {
+                LiveOrderService.LiveOrderResult r = liveOrders.placeSellOrder(symbol, MarketType.KRX, actualSellQty, price);
+                if (!r.isFilled()) {
+                    addDecision(symbol, "SELL", "ERROR", "SPLIT_1ST",
+                            String.format("매도 미체결 state=%s qty=%d", r.state, r.executedQty));
+                    return;
+                }
+                fillPrice = r.avgPrice > 0 ? r.avgPrice : price;
+                if (r.executedQty > 0 && r.executedQty != actualSellQty) {
+                    actualSellQty = r.executedQty;
+                    remainQty = totalQty - actualSellQty;
+                    isDust = remainQty <= 0 || remainQty * fillPrice < 50000;
+                }
+            } catch (Exception e) {
+                log.error("[KrxMorningRush] SPLIT_1ST sell failed for {}", symbol, e);
+                addDecision(symbol, "SELL", "ERROR", "SPLIT_1ST", "매도 실패: " + e.getMessage());
+                return;
+            }
+        }
+
+        double pnlKrw = (fillPrice - avgPrice) * actualSellQty;
+        double fee = fillPrice * actualSellQty * 0.00015;
+        pnlKrw -= fee;
+        double roiPct = avgPrice > 0 ? ((fillPrice - avgPrice) / avgPrice) * 100.0 : 0;
+
+        final double fFillPrice = fillPrice;
+        final double fPnlKrw = pnlKrw;
+        final double fRoiPct = roiPct;
+        final String fReason = reason;
+        final boolean fIsDust = isDust;
+        final int fActualSellQty = actualSellQty;
+        final int fRemainQty = remainQty;
+
+        try {
+            txTemplate.execute(new TransactionCallbackWithoutResult() {
+                @Override
+                protected void doInTransactionWithoutResult(TransactionStatus status) {
+                    TradeEntity tl = new TradeEntity();
+                    tl.setTsEpochMs(System.currentTimeMillis());
+                    tl.setSymbol(symbol);
+                    tl.setMarketType("KRX");
+                    tl.setAction("SELL");
+                    tl.setPrice(fFillPrice);
+                    tl.setQty(fActualSellQty);
+                    tl.setPnlKrw(fPnlKrw);
+                    tl.setRoiPercent(fRoiPct);
+                    tl.setMode(cfg.getMode());
+                    tl.setPatternType(ENTRY_STRATEGY);
+                    tl.setPatternReason(fReason);
+                    tl.setAvgBuyPrice(pe.getAvgPrice().doubleValue());
+                    tl.setNote(fIsDust ? "SPLIT_1ST_DUST" : "SPLIT_1ST");
+                    tl.setCurrency("KRW");
+                    tl.setScannerSource(SCANNER_SOURCE);
+                    tradeLogRepo.save(tl);
+
+                    if (fIsDust) {
+                        positionRepo.deleteById(symbol);
+                    } else {
+                        pe.setQty(fRemainQty);
+                        pe.setSplitPhase(1);
+                        pe.setSplitOriginalQty(totalQty);
+                        positionRepo.save(pe);
+                    }
+                }
+            });
+        } catch (Exception e) {
+            // DB 실패 시 cache rollback
+            log.error("[KrxMorningRush] SPLIT_1ST DB commit failed for {} — cache rollback", symbol, e);
+            double[] rollback = positionCache.get(symbol);
+            if (rollback != null && rollback.length >= 5) {
+                rollback[4] = 0;  // splitPhase → 0 복원
+            }
+            addDecision(symbol, "SELL", "ERROR", "SPLIT_1ST", "DB 실패, cache 롤백: " + e.getMessage());
+            return;
+        }
+
+        if (isDust) {
+            positionCache.remove(symbol);
+            log.info("[KrxMorningRush] SPLIT_1ST_DUST {} (전량, 잔량<50000원) price={} pnl={} roi={}%",
+                    symbol, fFillPrice, Math.round(pnlKrw), String.format("%.2f", roiPct));
+        } else {
+            log.info("[KrxMorningRush] SPLIT_1ST {} qty={}/{} price={} pnl={} roi={}%",
+                    symbol, actualSellQty, totalQty, fFillPrice,
+                    Math.round(pnlKrw), String.format("%.2f", roiPct));
+        }
+
+        addDecision(symbol, "SELL", "EXECUTED", "SPLIT_1ST", fReason);
+    }
+
     // ========== Helpers ==========
 
     private BigDecimal calcOrderSize(KrxMorningRushConfigEntity cfg) {
@@ -1086,21 +1360,23 @@ public class KrxMorningRushService {
         return sum;
     }
 
-    // ========== WebSocket 실시간 TP_TRAIL + 티어드 SL (V33) ==========
+    // ========== WebSocket 실시간 TP_TRAIL + 티어드 SL + Split-Exit (V34) ==========
 
     /**
-     * V33: TP_TRAIL + 티어드 SL 통합 실시간 체크 (코인봇 올데이 구조 동일).
+     * V34: Split-Exit + TP_TRAIL + 티어드 SL 통합 실시간 체크 (코인봇 동일 구조).
      *
-     * TP_TRAIL 활성화 후 (수익 +3% 도달한 적 있음):
-     *   → TP_TRAIL 단독 관리 (피크 추적, 피크 대비 -1.5% drop 시 매도)
-     *   → SL 비활성
+     * 우선순위:
+     * 1. Split-Exit (splitExitEnabled)
+     *    · splitPhase=0 + pnl >= splitTpPct → SPLIT_1ST (60% 매도, 40% 보유)
+     *    · splitPhase=1 → breakeven(SPLIT_2ND_BEV) 또는 trail drop(SPLIT_2ND_TRAIL)
+     * 2. TP_TRAIL (splitExit 비활성 시)
+     *    · 수익 +2.1% 도달 → trail 활성, peak 대비 -1.5% drop 시 매도
+     * 3. 티어드 SL (TP_TRAIL 미발동 시)
+     *    · Grace 0~30초: SL 무시 (비상 -10%만)
+     *    · Wide 30초~10분: SL_WIDE -2%
+     *    · Tight 10분~: SL_TIGHT -2%
      *
-     * TP_TRAIL 미활성:
-     *   Phase 1 Grace (0~30초):   SL 무시
-     *   Phase 2 Wide  (30초~10분): SL_WIDE -3%
-     *   Phase 3 Tight (10분~):     SL_TIGHT -3%
-     *
-     * positionCache: [avgPrice, peakPrice, trailActivated(0/1), openedAtEpochMs]
+     * positionCache: [avgPrice, peakPrice, trailActivated(0/1), openedAtEpochMs, splitPhase]
      */
     private void checkRealtimeTpSl(final String symbol, final double price) {
         if (!running.get()) return;
@@ -1113,6 +1389,7 @@ public class KrxMorningRushService {
         double peakPrice = pos[1];
         boolean activated = pos[2] > 0;
         long openedAtMs = pos.length >= 4 ? (long) pos[3] : 0;
+        int splitPhase = pos.length >= 5 ? (int) pos[4] : 0;
 
         double pnlPct = (price - avgPrice) / avgPrice * 100.0;
         long elapsedMs = openedAtMs > 0 ? System.currentTimeMillis() - openedAtMs : Long.MAX_VALUE;
@@ -1125,84 +1402,139 @@ public class KrxMorningRushService {
 
         String sellType = null;
         String reason = null;
+        boolean isSplitFirst = false;
 
-        // TP_TRAIL 활성화 체크
-        if (!activated && pnlPct >= cachedTpTrailActivatePct) {
-            pos[2] = 1.0;
-            activated = true;
-            log.info("[KrxMorningRush] TP_TRAIL activated: {} pnl=+{} peak={} (realtime)",
-                    symbol, String.format(java.util.Locale.ROOT, "%.2f%%", pnlPct), price);
+        // ━━━ V34: Split-Exit 1차 매도 (splitPhase=0, +splitTpPct 도달) ━━━
+        if (cachedSplitExitEnabled && splitPhase == 0 && pnlPct >= cachedSplitTpPct) {
+            sellType = "SPLIT_1ST";
+            isSplitFirst = true;
+            reason = String.format(java.util.Locale.ROOT,
+                    "SPLIT_1ST pnl=+%.2f%% >= %.2f%% avg=%.0f now=%.0f ratio=%.0f%% (realtime)",
+                    pnlPct, cachedSplitTpPct, avgPrice, price, cachedSplitRatio * 100);
         }
-
-        // 분기: TP_TRAIL 활성 vs 티어드 SL
-        if (activated) {
-            double dropFromPeak = (peakPrice - price) / peakPrice * 100.0;
-            if (dropFromPeak >= cachedTpTrailDropPct) {
-                sellType = "TP_TRAIL";
+        // ━━━ V34: Split 2차 관리 (splitPhase=1) ━━━
+        else if (cachedSplitExitEnabled && splitPhase == 1) {
+            if (pnlPct <= 0) {
+                sellType = "SPLIT_2ND_BEV";
                 reason = String.format(java.util.Locale.ROOT,
-                        "TP_TRAIL avg=%.0f peak=%.0f now=%.0f drop=%.2f%% pnl=%.2f%% (realtime)",
-                        avgPrice, peakPrice, price, dropFromPeak, pnlPct);
-            }
-        } else {
-            if (elapsedMs < cachedGracePeriodMs) {
-                // Grace: SL 무시 (비상 -10%만)
-                if (pnlPct <= -10.0) {
-                    sellType = "SL_EMERGENCY";
+                        "SPLIT_2ND_BEV pnl=%.2f%% <= 0%% (breakeven) avg=%.0f now=%.0f (realtime)",
+                        pnlPct, avgPrice, price);
+            } else if (peakPrice > avgPrice) {
+                double dropFromPeakPct = (peakPrice - price) / peakPrice * 100.0;
+                if (dropFromPeakPct >= cachedTrailDropAfterSplit) {
+                    sellType = "SPLIT_2ND_TRAIL";
                     reason = String.format(java.util.Locale.ROOT,
-                            "SL_EMERGENCY pnl=%.2f%% price=%.0f avg=%.0f (grace, realtime)", pnlPct, price, avgPrice);
-                }
-            } else if (elapsedMs < cachedWidePeriodMs) {
-                if (pnlPct <= -cachedWideSlPct) {
-                    sellType = "SL_WIDE";
-                    reason = String.format(java.util.Locale.ROOT,
-                            "SL_WIDE pnl=%.2f%% <= -%.2f%% price=%.0f avg=%.0f (realtime)",
-                            pnlPct, cachedWideSlPct, price, avgPrice);
-                }
-            } else {
-                if (pnlPct <= -cachedSlPct) {
-                    sellType = "SL_TIGHT";
-                    reason = String.format(java.util.Locale.ROOT,
-                            "SL_TIGHT pnl=%.2f%% <= -%.2f%% price=%.0f avg=%.0f (realtime)",
-                            pnlPct, cachedSlPct, price, avgPrice);
+                            "SPLIT_2ND_TRAIL avg=%.0f peak=%.0f now=%.0f drop=%.2f%% >= %.2f%% pnl=%.2f%% (realtime)",
+                            avgPrice, peakPrice, price, dropFromPeakPct, cachedTrailDropAfterSplit, pnlPct);
                 }
             }
         }
+        // ━━━ 기존: splitExit 비활성 ━━━
+        else {
+            // TP_TRAIL 활성화 체크
+            if (!activated && pnlPct >= cachedTpTrailActivatePct) {
+                pos[2] = 1.0;
+                activated = true;
+                log.info("[KrxMorningRush] TP_TRAIL activated: {} pnl=+{} peak={} (realtime)",
+                        symbol, String.format(java.util.Locale.ROOT, "%.2f%%", pnlPct), price);
+            }
 
-        if (sellType != null) {
-            if (positionCache.remove(symbol) == null) return;
+            // 분기: TP_TRAIL 활성 vs 티어드 SL
+            if (activated) {
+                double dropFromPeak = (peakPrice - price) / peakPrice * 100.0;
+                if (dropFromPeak >= cachedTpTrailDropPct) {
+                    sellType = "TP_TRAIL";
+                    reason = String.format(java.util.Locale.ROOT,
+                            "TP_TRAIL avg=%.0f peak=%.0f now=%.0f drop=%.2f%% pnl=%.2f%% (realtime)",
+                            avgPrice, peakPrice, price, dropFromPeak, pnlPct);
+                }
+            }
 
-            final String fSellType = sellType;
-            final String fReason = reason;
-            log.info("[KrxMorningRush] realtime {} detected | {} | {}", fSellType, symbol, fReason);
-
-            tpSlExecutor.submit(new Runnable() {
-                @Override
-                public void run() {
-                    try {
-                        PositionEntity fresh = positionRepo.findById(symbol).orElse(null);
-                        if (fresh == null || fresh.getQty() <= 0) return;
-                        if (!ENTRY_STRATEGY.equals(fresh.getEntryStrategy())) return;
-                        KrxMorningRushConfigEntity cfg = configRepo.loadOrCreate();
-                        executeSell(fresh, price, Signal.of(SignalAction.SELL, null, fReason), cfg);
-                    } catch (Exception e) {
-                        log.error("[KrxMorningRush] realtime sell failed for {}", symbol, e);
+            // 티어드 SL (TP_TRAIL 미발동 시)
+            if (sellType == null) {
+                if (elapsedMs < cachedGracePeriodMs) {
+                    // Grace: SL 무시 (비상 -10%만)
+                    if (pnlPct <= -10.0) {
+                        sellType = "SL_EMERGENCY";
+                        reason = String.format(java.util.Locale.ROOT,
+                                "SL_EMERGENCY pnl=%.2f%% price=%.0f avg=%.0f (grace, realtime)", pnlPct, price, avgPrice);
+                    }
+                } else if (elapsedMs < cachedWidePeriodMs) {
+                    if (pnlPct <= -cachedWideSlPct) {
+                        sellType = "SL_WIDE";
+                        reason = String.format(java.util.Locale.ROOT,
+                                "SL_WIDE pnl=%.2f%% <= -%.2f%% price=%.0f avg=%.0f (realtime)",
+                                pnlPct, cachedWideSlPct, price, avgPrice);
+                    }
+                } else {
+                    if (pnlPct <= -cachedSlPct) {
+                        sellType = "SL_TIGHT";
+                        reason = String.format(java.util.Locale.ROOT,
+                                "SL_TIGHT pnl=%.2f%% <= -%.2f%% price=%.0f avg=%.0f (realtime)",
+                                pnlPct, cachedSlPct, price, avgPrice);
                     }
                 }
-            });
+            }
         }
+
+        if (sellType == null) return;
+
+        // race 방어
+        if (!sellingSymbols.add(symbol)) {
+            log.debug("[KrxMorningRush] SELL in progress, skip duplicate trigger: {}", symbol);
+            return;
+        }
+
+        if (isSplitFirst) {
+            // V34: 1차 매도 — 캐시 유지, splitPhase=1로 갱신
+            pos[4] = 1.0;    // splitPhase=1
+            pos[1] = price;  // peak 리셋 (2차 trail 기준점)
+        } else {
+            positionCache.remove(symbol);
+        }
+
+        final String fSellType = sellType;
+        final String fReason = reason;
+        final boolean fIsSplitFirst = isSplitFirst;
+        log.info("[KrxMorningRush] realtime {} detected | {} | {}", fSellType, symbol, fReason);
+
+        tpSlExecutor.submit(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    PositionEntity fresh = positionRepo.findById(symbol).orElse(null);
+                    if (fresh == null || fresh.getQty() <= 0) return;
+                    if (!ENTRY_STRATEGY.equals(fresh.getEntryStrategy())) return;
+                    KrxMorningRushConfigEntity cfg = configRepo.loadOrCreate();
+                    if (fIsSplitFirst) {
+                        executeSplitFirstSell(fresh, price, fReason, cfg);
+                    } else {
+                        executeSell(fresh, price, Signal.of(SignalAction.SELL, null, fReason), cfg);
+                    }
+                } catch (Exception e) {
+                    log.error("[KrxMorningRush] realtime sell failed for {}", symbol, e);
+                } finally {
+                    sellingSymbols.remove(symbol);
+                }
+            }
+        });
     }
 
     /**
      * mainLoop에서 호출: 포지션 캐시 + TP/SL 캐시 업데이트.
      */
     private void updateRealtimeCache(KrxMorningRushConfigEntity cfg) {
-        // V33: TP_TRAIL + 티어드 SL cached 변수 갱신
+        // V34: TP_TRAIL + 티어드 SL + Split-Exit cached 변수 갱신
         cachedTpTrailActivatePct = cfg.getTpTrailActivatePct().doubleValue();
         cachedTpTrailDropPct = cfg.getTpTrailDropPct().doubleValue();
         cachedSlPct = cfg.getSlPct().doubleValue();
         cachedWideSlPct = cfg.getWideSlPct().doubleValue();
         cachedGracePeriodMs = cfg.getGracePeriodSec() * 1000L;
         cachedWidePeriodMs = cfg.getWidePeriodMin() * 60_000L;
+        cachedSplitExitEnabled = cfg.isSplitExitEnabled();
+        cachedSplitTpPct = cfg.getSplitTpPct().doubleValue();
+        cachedSplitRatio = cfg.getSplitRatio().doubleValue();
+        cachedTrailDropAfterSplit = cfg.getTrailDropAfterSplit().doubleValue();
 
         Set<String> current = new java.util.HashSet<String>();
         for (PositionEntity pe : positionRepo.findAll()) {
@@ -1211,7 +1543,7 @@ public class KrxMorningRushService {
                 if (!positionCache.containsKey(pe.getSymbol())) {
                     double avg = pe.getAvgPrice().doubleValue();
                     long openedAt = pe.getOpenedAt() != null ? pe.getOpenedAt().toEpochMilli() : System.currentTimeMillis();
-                    positionCache.put(pe.getSymbol(), new double[]{avg, avg, 0, openedAt});
+                    positionCache.put(pe.getSymbol(), new double[]{avg, avg, 0, openedAt, pe.getSplitPhase()});
                 }
             }
         }
