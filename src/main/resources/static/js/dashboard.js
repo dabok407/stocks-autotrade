@@ -393,11 +393,11 @@
       // keep empty
     }
 
-    // Build marketLabel map from API
+    // Build marketLabel map from API (symbol → displayName)
     try{
       const list = await req('/api/bot/stocks', { method:'GET' });
       const configs = Array.isArray(list) ? list : [];
-      marketLabel = new Map(configs.map(m => [String(m.market), String(m.displayName || m.market)]));
+      marketLabel = new Map(configs.map(m => [String(m.symbol), String(m.displayName || m.symbol)]));
     }catch(e){
       // keep empty
     }
@@ -588,11 +588,11 @@
     const actionQ = logActionFilter.value;
 
     let filtered = logs;
-    // Market filter: 영문 코드 + 한글 이름 모두 검색
+    // Market filter: 종목코드 + 종목명 모두 검색
     if(marketQ) filtered = filtered.filter(function(x){
-      var code = String(x.market||'').toUpperCase();
-      var name = (marketLabel.get(String(x.market||'')) || '').toUpperCase();
-      return code.includes(marketQ) || name.includes(marketQ);
+      var sym = String(x.symbol || x.market || '').toUpperCase();
+      var name = (marketLabel.get(String(x.symbol || x.market || '')) || '').toUpperCase();
+      return sym.includes(marketQ) || name.includes(marketQ);
     });
     if(actionQ !== 'ALL') filtered = filtered.filter(x => x.action === actionQ);
     // Type 멀티셀렉트 필터
@@ -612,8 +612,9 @@
     }
 
     logTbody.innerHTML = filtered.map((x, idx) => {
-      const marketCode = x.market ?? '-';
-      const marketText = marketLabel.get(String(marketCode)) || marketCode;
+      const marketCode = x.symbol ?? x.market ?? '-';
+      const marketName = marketLabel.get(String(marketCode));
+      const marketText = marketName ? `${marketName} <span style="color:var(--text-muted);font-size:11px">(${marketCode})</span>` : marketCode;
       const actionText = labelAction(x.action);
       const typeKey = x.patternType ?? x.orderType ?? '-';
       const typeText = strategyLabel.get(String(typeKey)) || typeKey;
@@ -663,7 +664,7 @@
       tr.addEventListener('click', () => {
         const idx = parseInt(tr.getAttribute('data-logidx'), 10);
         const x = filtered[idx];
-        if (!x || !x.market) return;
+        if (!x || !(x.symbol || x.market)) return;
         const typeKey = x.patternType ?? x.orderType ?? '-';
         const typeLabel = strategyLabel.get(String(typeKey)) || typeKey;
         // 차트 분봉 결정: 거래 기록에 저장된 분봉 > 전략별 인터벌 > 글로벌 인터벌
@@ -676,7 +677,7 @@
         }
         if (window.ChartPopup) {
           window.ChartPopup.open({
-            market: x.market,
+            market: x.symbol || x.market,
             tsEpochMs: x.tsEpochMs || Date.now(),
             action: x.action,
             price: x.price,
