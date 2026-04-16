@@ -119,7 +119,7 @@ public class KrxMorningRushSplitExitTest {
         // Split-Exit 기본값
         setField("cachedSplitExitEnabled", true);
         setField("cachedSplitTpPct", 1.6);
-        setField("cachedSplitRatio", 0.60);
+        setField("cachedSplitRatio", 0.40);
         setField("cachedTrailDropAfterSplit", 1.5);
 
         when(txTemplate.execute(any())).thenAnswer(new Answer<Object>() {
@@ -148,7 +148,7 @@ public class KrxMorningRushSplitExitTest {
         invoke("SPL1", 10160);  // +1.6%
         Thread.sleep(300);
 
-        // 캐시 남아있어야 함 (1차 매도 후 2차 대기, remain=40 * 10160=406,400 > 50000)
+        // 캐시 남아있어야 함 (1차 매도 후 2차 대기, remain=60 * 10160=609,600 > 50000)
         assertTrue(getCache().containsKey("SPL1"), "1차 매도 후 캐시 유지");
         assertEquals(1.0, getCache().get("SPL1")[4], 0.01, "splitPhase=1");
     }
@@ -245,7 +245,7 @@ public class KrxMorningRushSplitExitTest {
     @Test
     @DisplayName("S09: 잔량*가격 < 50000 → SPLIT_1ST_DUST (전량 매도)")
     public void splitFirst_dust() throws Exception {
-        // qty=3, price=10160 → sellQty=2, remainQty=1 → 1*10160=10160 < 50000 → dust
+        // qty=3, ratio=0.40, price=10160 → sellQty=1, remainQty=2 → 2*10160=20,320 < 50000 → dust
         putPosition("DUST", 10000, System.currentTimeMillis() - 60_000, 0);
         when(positionRepo.findById("DUST")).thenReturn(Optional.of(buildPos("DUST", 10000, 3, 0)));
         when(configRepo.loadOrCreate()).thenReturn(buildConfig());
@@ -488,7 +488,7 @@ public class KrxMorningRushSplitExitTest {
         cfg.setMode("PAPER");
         cfg.setSplitExitEnabled(true);
         cfg.setSplitTpPct(BigDecimal.valueOf(1.6));
-        cfg.setSplitRatio(BigDecimal.valueOf(0.60));
+        cfg.setSplitRatio(BigDecimal.valueOf(0.40));
         cfg.setTrailDropAfterSplit(BigDecimal.valueOf(1.5));
         cfg.setTpTrailActivatePct(BigDecimal.valueOf(2.1));
         cfg.setTpTrailDropPct(BigDecimal.valueOf(1.5));

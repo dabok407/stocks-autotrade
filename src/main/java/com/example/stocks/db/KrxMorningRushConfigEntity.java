@@ -105,7 +105,7 @@ public class KrxMorningRushConfigEntity {
     private BigDecimal splitTpPct = BigDecimal.valueOf(1.6);
 
     @Column(name = "split_ratio", nullable = false, precision = 5, scale = 2)
-    private BigDecimal splitRatio = BigDecimal.valueOf(0.60);
+    private BigDecimal splitRatio = BigDecimal.valueOf(0.40);
 
     @Column(name = "trail_drop_after_split", nullable = false, precision = 5, scale = 2)
     private BigDecimal trailDropAfterSplit = BigDecimal.valueOf(1.5);
@@ -196,7 +196,7 @@ public class KrxMorningRushConfigEntity {
     public void setSplitTpPct(BigDecimal v) { this.splitTpPct = v != null ? v : BigDecimal.valueOf(1.6); }
 
     public BigDecimal getSplitRatio() { return splitRatio; }
-    public void setSplitRatio(BigDecimal v) { this.splitRatio = v != null ? v : BigDecimal.valueOf(0.60); }
+    public void setSplitRatio(BigDecimal v) { this.splitRatio = v != null ? v : BigDecimal.valueOf(0.40); }
 
     public BigDecimal getTrailDropAfterSplit() { return trailDropAfterSplit; }
     public void setTrailDropAfterSplit(BigDecimal v) { this.trailDropAfterSplit = v != null ? v : BigDecimal.valueOf(1.5); }

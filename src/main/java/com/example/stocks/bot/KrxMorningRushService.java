@@ -91,7 +91,7 @@ public class KrxMorningRushService {
     // V34: Split-Exit cached 변수
     private volatile boolean cachedSplitExitEnabled = true;
     private volatile double cachedSplitTpPct = 1.6;
-    private volatile double cachedSplitRatio = 0.60;
+    private volatile double cachedSplitRatio = 0.40;
     private volatile double cachedTrailDropAfterSplit = 1.5;
     private volatile KisWebSocketClient.PriceListener wsListener;
     // V34: race condition 방어 (WS + REST 동시 매도 방지)
@@ -1207,7 +1207,7 @@ public class KrxMorningRushService {
     // ========== V34: Split-Exit 1차 분할 매도 ==========
 
     /**
-     * Split-Exit 1차 매도: 전체 수량의 ratio(60%) 매도, 나머지 보유.
+     * Split-Exit 1차 매도: 전체 수량의 ratio(40%) 매도, 나머지 보유.
      * 코인봇 executeSplitFirstSell과 동일 구조.
      *
      * Dust 처리: 잔량 * 가격 < 50,000원이면 전량 매도.
@@ -1367,7 +1367,7 @@ public class KrxMorningRushService {
      *
      * 우선순위:
      * 1. Split-Exit (splitExitEnabled)
-     *    · splitPhase=0 + pnl >= splitTpPct → SPLIT_1ST (60% 매도, 40% 보유)
+     *    · splitPhase=0 + pnl >= splitTpPct → SPLIT_1ST (40% 매도, 60% 보유)
      *    · splitPhase=1 → breakeven(SPLIT_2ND_BEV) 또는 trail drop(SPLIT_2ND_TRAIL)
      * 2. TP_TRAIL (splitExit 비활성 시)
      *    · 수익 +2.1% 도달 → trail 활성, peak 대비 -1.5% drop 시 매도

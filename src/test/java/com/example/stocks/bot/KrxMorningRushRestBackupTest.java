@@ -321,7 +321,7 @@ public class KrxMorningRushRestBackupTest {
         cfg.setMode("PAPER");
         cfg.setSplitExitEnabled(splitEnabled);
         cfg.setSplitTpPct(BigDecimal.valueOf(1.6));
-        cfg.setSplitRatio(BigDecimal.valueOf(0.60));
+        cfg.setSplitRatio(BigDecimal.valueOf(0.40));
         cfg.setTrailDropAfterSplit(BigDecimal.valueOf(1.5));
         cfg.setTpTrailActivatePct(BigDecimal.valueOf(2.1));
         cfg.setTpTrailDropPct(BigDecimal.valueOf(1.5));
