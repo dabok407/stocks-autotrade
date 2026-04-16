@@ -11,6 +11,7 @@ import com.example.stocks.db.StockConfigRepository;
 import com.example.stocks.db.TradeEntity;
 import com.example.stocks.db.TradeRepository;
 import com.example.stocks.exchange.ExchangeAdapter;
+import com.example.stocks.kis.KisPublicClient;
 import com.example.stocks.market.MarketType;
 
 import org.springframework.data.domain.Page;
@@ -18,6 +19,7 @@ import org.springframework.data.domain.PageRequest;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Bot control + status API for the stock trading bot.
@@ -31,17 +33,23 @@ public class BotApiController {
     private final BotConfigRepository botConfigRepo;
     private final StockConfigRepository stockConfigRepo;
     private final KrxOvertimeRankLogRepository overtimeRankRepo;
+    private final KisPublicClient kisPublic;
+
+    /** 심볼 → 종목명 인메모리 캐시 (KIS 조회 폴백용, 재시작 시 리셋). */
+    private final ConcurrentHashMap<String, String> symbolNameCache = new ConcurrentHashMap<String, String>();
 
     public BotApiController(TradingBotService bot, TradeRepository tradeRepo,
                             ExchangeAdapter exchangeAdapter, BotConfigRepository botConfigRepo,
                             StockConfigRepository stockConfigRepo,
-                            KrxOvertimeRankLogRepository overtimeRankRepo) {
+                            KrxOvertimeRankLogRepository overtimeRankRepo,
+                            KisPublicClient kisPublic) {
         this.bot = bot;
         this.tradeRepo = tradeRepo;
         this.exchangeAdapter = exchangeAdapter;
         this.botConfigRepo = botConfigRepo;
         this.stockConfigRepo = stockConfigRepo;
         this.overtimeRankRepo = overtimeRankRepo;
+        this.kisPublic = kisPublic;
     }
 
     @PostMapping("/api/bot/start")
@@ -149,26 +157,61 @@ public class BotApiController {
         return resp;
     }
 
-    /** stock_config.displayName → overtime_rank_log.symbolName 순으로 심볼명 채움. */
+    /**
+     * 거래내역 심볼명 채움. 우선순위:
+     * 1) stock_config.displayName
+     * 2) krx_overtime_rank_log.symbolName (최신)
+     * 3) KIS inquire-price의 hts_kor_isnm (KRX, 인메모리 캐시)
+     */
     private void enrichSymbolNames(List<TradeEntity> trades) {
         if (trades == null || trades.isEmpty()) return;
-        Set<String> symbols = new HashSet<String>();
+        // 심볼별 시장타입 수집 (US 심볼은 KIS 국내 조회 제외)
+        Map<String, String> symbolMarket = new HashMap<String, String>();
         for (TradeEntity t : trades) {
-            if (t.getSymbol() != null) symbols.add(t.getSymbol());
+            if (t.getSymbol() != null && !symbolMarket.containsKey(t.getSymbol())) {
+                symbolMarket.put(t.getSymbol(), t.getMarketType());
+            }
         }
-        if (symbols.isEmpty()) return;
+        if (symbolMarket.isEmpty()) return;
 
         Map<String, String> nameMap = new HashMap<String, String>();
-        for (StockConfigEntity sc : stockConfigRepo.findAllById(symbols)) {
+        // 1) stock_config
+        for (StockConfigEntity sc : stockConfigRepo.findAllById(symbolMarket.keySet())) {
             if (sc.getDisplayName() != null && !sc.getDisplayName().isEmpty()) {
                 nameMap.put(sc.getSymbol(), sc.getDisplayName());
             }
         }
-        for (String sym : symbols) {
+        // 2) rank log fallback
+        for (String sym : symbolMarket.keySet()) {
             if (nameMap.containsKey(sym)) continue;
             Optional<KrxOvertimeRankLogEntity> opt = overtimeRankRepo.findFirstBySymbolOrderByIdDesc(sym);
             if (opt.isPresent() && opt.get().getSymbolName() != null) {
                 nameMap.put(sym, opt.get().getSymbolName());
+            }
+        }
+        // 3) KIS 조회 (KRX만, 캐시)
+        for (Map.Entry<String, String> e : symbolMarket.entrySet()) {
+            String sym = e.getKey();
+            String mkt = e.getValue();
+            if (nameMap.containsKey(sym)) continue;
+            if (!"KRX".equalsIgnoreCase(mkt)) continue;
+            String cached = symbolNameCache.get(sym);
+            if (cached != null) {
+                nameMap.put(sym, cached);
+                continue;
+            }
+            try {
+                Map<String, Object> output = kisPublic.getDomesticCurrentPrice(sym);
+                Object isnm = output.get("hts_kor_isnm");
+                if (isnm != null) {
+                    String name = String.valueOf(isnm).trim();
+                    if (!name.isEmpty()) {
+                        symbolNameCache.put(sym, name);
+                        nameMap.put(sym, name);
+                    }
+                }
+            } catch (Exception ex) {
+                // KIS 조회 실패는 무시 — FE는 코드만 표시
             }
         }
         for (TradeEntity t : trades) {
