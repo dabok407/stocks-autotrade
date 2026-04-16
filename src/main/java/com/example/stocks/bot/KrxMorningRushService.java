@@ -19,6 +19,7 @@ import org.springframework.transaction.support.TransactionCallbackWithoutResult;
 import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.transaction.TransactionStatus;
 
+import javax.annotation.PostConstruct;
 import javax.annotation.PreDestroy;
 
 import java.math.BigDecimal;
@@ -130,7 +131,15 @@ public class KrxMorningRushService {
 
     // 당일 매매 완료 종목 (익절/손절 후 재매수 방지, 2026-04-11 추가)
     // 모닝러쉬 원칙: 종목당 1회만 매수. 매도 후 같은 종목 재진입 금지.
+    // 재시작 시 @PostConstruct에서 오늘 trade_log 기반으로 복원 (2026-04-17 #2)
     private final Set<String> tradedSymbols = ConcurrentHashMap.newKeySet();
+
+    // #1 (2026-04-17): ORDER_NOT_FILLED retry drift guard.
+    // 같은 심볼이 여러 번 buy 시도될 때 최초 시도 가격을 기록 → 재시도 시점에
+    // 가격이 RETRY_PRICE_DRIFT_MAX 이상 올라갔으면 포기 (펌프 따라가기 방지).
+    // 성공 매수 시 remove, IDLE 전환 시 clear.
+    private final ConcurrentHashMap<String, Double> firstBuyAttemptPrice = new ConcurrentHashMap<String, Double>();
+    static final double RETRY_PRICE_DRIFT_MAX = 0.02; // 2%
 
     // Alive heartbeat (every 60s) — proves mainLoop is still ticking,
     // even when statusText is silent (e.g., IDLE outside hours)
@@ -166,6 +175,40 @@ public class KrxMorningRushService {
         this.exchangeAdapter = exchangeAdapter;
         this.kisPublic = kisPublic;
         this.overtimeRankRepo = overtimeRankRepo;
+    }
+
+    // ========== Restore on restart (2026-04-17 #2) ==========
+
+    /**
+     * 앱 재시작 시 오늘(KST) 장중 거래된 모닝러쉬 종목을 tradedSymbols에 복원.
+     * 목적: 장중 크래시/재배포 후 이미 매매 완료된 종목을 재매수하지 않기.
+     *
+     * 기준:
+     * - tsEpochMs >= 오늘 KST 00:00
+     * - patternType == ENTRY_STRATEGY ("KRX_MORNING_RUSH")
+     * - 어떤 action이든 한 번이라도 기록된 심볼 → 재매수 금지
+     */
+    @PostConstruct
+    public void restoreTradedSymbolsFromDb() {
+        try {
+            ZonedDateTime nowKst = ZonedDateTime.now(KST);
+            long startMs = nowKst.toLocalDate().atStartOfDay(KST).toInstant().toEpochMilli();
+            long endMs = System.currentTimeMillis();
+
+            List<TradeEntity> todays = tradeLogRepo.findByTsEpochMsBetween(startMs, endMs);
+            int count = 0;
+            for (TradeEntity t : todays) {
+                if (ENTRY_STRATEGY.equals(t.getPatternType()) && t.getSymbol() != null) {
+                    if (tradedSymbols.add(t.getSymbol())) count++;
+                }
+            }
+            if (count > 0) {
+                log.info("[KrxMorningRush] tradedSymbols restored from DB: {} symbols (today's MR trades)",
+                        tradedSymbols.size());
+            }
+        } catch (Exception e) {
+            log.warn("[KrxMorningRush] tradedSymbols restore failed: {}", e.getMessage());
+        }
     }
 
     // ========== Decision Log ==========
@@ -206,6 +249,7 @@ public class KrxMorningRushService {
         statusText = "RUNNING";
         currentPhase = Phase.IDLE;
         confirmCounts.clear();
+        confirmPriceHistory.clear();
         prevCloseMap.clear();
         avgVolumeMap.clear();
 
@@ -368,9 +412,11 @@ public class KrxMorningRushService {
                     // IDLE → COLLECTING_RANGE
                     currentPhase = Phase.COLLECTING_RANGE;
                     confirmCounts.clear();
+                    confirmPriceHistory.clear(); // 2026-04-17 #5: 어제 이력 잔존 방지
                     prevCloseMap.clear();
                     avgVolumeMap.clear();
                     tradedSymbols.clear();
+                    firstBuyAttemptPrice.clear(); // 2026-04-17 #1
                     log.info("[KrxMorningRush] Phase: IDLE → COLLECTING_RANGE (08:50 도달, 신규 데이터 수집 시작)");
                 } else {
                     statusText = "IDLE (outside hours)";
@@ -800,6 +846,51 @@ public class KrxMorningRushService {
             //   - 4/10 시뮬레이션: ascending 제거 시 엔피 968원 매수 → +2% 익절 가능
             // ════════════════════════════════════════════════════════════════
 
+            // ════════════════════════════════════════════════════════════════
+            // #5 (2026-04-17): confirm 중 단조 감소(strictly decreasing) 감지 → 진입 스킵
+            // ════════════════════════════════════════════════════════════════
+            // 배경: 4/16 073540 — Confirm 1/3 @6265 → 2/3 @6230 → EXECUTED @6200
+            //       3번 모두 하락 중인데 gap은 여전히 2% 이상 → 진입 허용 → 즉시 SL.
+            // 정책: ascending(엄격한 상승)이 아니라 "단조 감소만 차단" — 출렁임(1014→968→1081)은 허용.
+            if (prices.size() >= 2) {
+                Double[] arr = prices.toArray(new Double[0]);
+                boolean strictlyDecreasing = true;
+                for (int i = 1; i < arr.length; i++) {
+                    if (arr[i] >= arr[i - 1]) { strictlyDecreasing = false; break; }
+                }
+                if (strictlyDecreasing) {
+                    addDecision(symbol, "BUY", "SKIPPED", "DOWNTREND_IN_CONFIRM",
+                            String.format("Confirm prices %s strictly decreasing — skip (falling knife)",
+                                    java.util.Arrays.toString(arr)));
+                    confirmCounts.remove(symbol);
+                    confirmPriceHistory.remove(symbol);
+                    continue;
+                }
+            }
+
+            // ════════════════════════════════════════════════════════════════
+            // #1 (2026-04-17): ORDER_NOT_FILLED retry drift guard
+            // ════════════════════════════════════════════════════════════════
+            // 배경: 4/16 072950 — 09:04:14 "주문가능금액 초과" 실패 2회 → 자금 확보 후 09:04:41 체결
+            //       시점엔 가격이 22500 → 25150 (+11.8%)로 폭등, 꼭지 잡음 → -3.38% SL.
+            // 정책: 같은 심볼의 첫 시도 가격 대비 현재가가 RETRY_PRICE_DRIFT_MAX 이상 올라가면 포기.
+            Double firstPrice = firstBuyAttemptPrice.get(symbol);
+            if (firstPrice != null) {
+                double drift = (currentPrice - firstPrice) / firstPrice;
+                if (drift >= RETRY_PRICE_DRIFT_MAX) {
+                    addDecision(symbol, "BUY", "SKIPPED", "RETRY_PRICE_DRIFT",
+                            String.format("retry price %.0f drifted +%.2f%% from first attempt %.0f (cap %.2f%%)",
+                                    currentPrice, drift * 100, firstPrice, RETRY_PRICE_DRIFT_MAX * 100));
+                    firstBuyAttemptPrice.remove(symbol);
+                    tradedSymbols.add(symbol); // 당일 재시도 완전 차단
+                    confirmCounts.remove(symbol);
+                    confirmPriceHistory.remove(symbol);
+                    continue;
+                }
+            } else {
+                firstBuyAttemptPrice.put(symbol, currentPrice);
+            }
+
             // 확인 완료 — 로그 초기화
             confirmCounts.remove(symbol);
             prices.clear();
@@ -810,6 +901,7 @@ public class KrxMorningRushService {
                 if (bought) {
                     rushPosCount++;
                     tradedSymbols.add(symbol); // 당일 재매수 방지
+                    firstBuyAttemptPrice.remove(symbol); // #1: 성공 시 retry 기록 삭제
                     addDecision(symbol, "BUY", "EXECUTED", "GAP_UP",
                             String.format("Gap %.2f%% price=%.0f prevClose=%.0f", gapPct * 100, currentPrice, prevClose));
                 }
@@ -987,12 +1079,14 @@ public class KrxMorningRushService {
             if (sellReason == null) continue;
 
             // race 방어: WS realtime과 REST monitorPositions 동시 매도 방지
+            // #4 (2026-04-17): debug → info 로 승격하여 운영에서 race 발생 시 관측 가능하게 함.
             if (!sellingSymbols.add(symbol)) {
-                log.debug("[KrxMorningRush] REST SELL skip, already in progress: {}", symbol);
+                log.info("[KrxMorningRush] REST SELL skip, already in progress by another path (likely WS realtime): {} reason={}",
+                        symbol, sellReason);
                 continue;
             }
 
-            log.info("[KrxMorningRush] {} triggered | {} | {}", sellType, symbol, sellReason);
+            log.info("[KrxMorningRush] REST path {} triggered | {} | {}", sellType, symbol, sellReason);
 
             try {
                 PositionEntity fresh = positionRepo.findById(symbol).orElse(null);
@@ -1000,11 +1094,16 @@ public class KrxMorningRushService {
 
                 if (isSplitFirst) {
                     executeSplitFirstSell(fresh, currentPrice, sellReason, cfg);
+                    addDecision(symbol, "SELL", "EXECUTED", sellType, sellReason);
                 } else {
-                    positionCache.remove(symbol);
-                    executeSell(fresh, currentPrice, Signal.of(SignalAction.SELL, null, sellReason), cfg);
+                    // #3 (2026-04-17): cache 제거는 DB commit 성공 후에만.
+                    boolean sold = executeSell(fresh, currentPrice, Signal.of(SignalAction.SELL, null, sellReason), cfg);
+                    if (sold) {
+                        positionCache.remove(symbol);
+                        addDecision(symbol, "SELL", "EXECUTED", sellType, sellReason);
+                    }
+                    // sold == false 인 경우 executeSell 내부에서 이미 ERROR 로그 + addDecision 기록됨.
                 }
-                addDecision(symbol, "SELL", "EXECUTED", sellType, sellReason);
             } catch (Exception e) {
                 log.error("[KrxMorningRush] REST sell failed for {}", symbol, e);
                 addDecision(symbol, "SELL", "ERROR", "SELL_FAIL", "REST 매도 실행 오류: " + e.getMessage());
@@ -1039,10 +1138,13 @@ public class KrxMorningRushService {
             String reason = pe.getSplitPhase() == 1
                     ? "SPLIT_SESSION_END: 2차 잔량 세션 종료 청산"
                     : "SESSION_END: KRX morning rush session closing";
-            executeSell(pe, currentPrice, Signal.of(SignalAction.SELL, null, reason), cfg);
-            addDecision(pe.getSymbol(), "SELL", "EXECUTED", "SESSION_END", reason);
+            // #3 (2026-04-17): 성공한 건만 decision 로그에 EXECUTED 기록.
+            boolean sold = executeSell(pe, currentPrice, Signal.of(SignalAction.SELL, null, reason), cfg);
+            if (sold) {
+                positionCache.remove(pe.getSymbol());
+                addDecision(pe.getSymbol(), "SELL", "EXECUTED", "SESSION_END", reason);
+            }
         }
-        positionCache.clear();
     }
 
     // ========== Order Execution ==========
@@ -1139,7 +1241,12 @@ public class KrxMorningRushService {
         return true;
     }
 
-    private void executeSell(final PositionEntity pe, double price, Signal signal,
+    /**
+     * #3 (2026-04-17): executeSell returns boolean — true if DB commit succeeded (position deleted).
+     * 호출자는 true인 경우에만 positionCache 에서 제거해야 함.
+     * 주문 미체결/예외 상황에서 position 은 DB에 살아있으므로 cache 도 유지해야 realtime 재시도 가능.
+     */
+    private boolean executeSell(final PositionEntity pe, double price, Signal signal,
                               final KrxMorningRushConfigEntity cfg) {
         boolean isPaper = "PAPER".equalsIgnoreCase(cfg.getMode());
         final double fillPrice;
@@ -1150,19 +1257,19 @@ public class KrxMorningRushService {
         } else {
             if (!liveOrders.isConfigured()) {
                 addDecision(pe.getSymbol(), "SELL", "BLOCKED", "API_KEY_MISSING", "LIVE mode API not configured");
-                return;
+                return false;
             }
             try {
                 LiveOrderService.LiveOrderResult r = liveOrders.placeSellOrder(pe.getSymbol(), MarketType.KRX, qty, price);
                 if (!r.isFilled()) {
                     addDecision(pe.getSymbol(), "SELL", "ERROR", "ORDER_NOT_FILLED",
                             String.format("Sell not filled state=%s qty=%d", r.state, r.executedQty));
-                    return;
+                    return false;
                 }
                 fillPrice = r.avgPrice > 0 ? r.avgPrice : price;
             } catch (Exception e) {
                 addDecision(pe.getSymbol(), "SELL", "ERROR", "ORDER_EXCEPTION", "Sell failed: " + e.getMessage());
-                return;
+                return false;
             }
         }
 
@@ -1175,33 +1282,44 @@ public class KrxMorningRushService {
         final String peSymbol = pe.getSymbol();
         final String signalReason = signal.reason;
 
-        txTemplate.execute(new TransactionCallbackWithoutResult() {
-            @Override
-            protected void doInTransactionWithoutResult(TransactionStatus status) {
-                TradeEntity tl = new TradeEntity();
-                tl.setTsEpochMs(System.currentTimeMillis());
-                tl.setSymbol(peSymbol);
-                tl.setMarketType("KRX");
-                tl.setAction("SELL");
-                tl.setPrice(fillPrice);
-                tl.setQty(qty);
-                tl.setPnlKrw(fPnlKrw);
-                tl.setRoiPercent(roiPct);
-                tl.setMode(cfg.getMode());
-                tl.setPatternType(ENTRY_STRATEGY);
-                tl.setPatternReason(signalReason);
-                tl.setAvgBuyPrice(pe.getAvgPrice().doubleValue());
-                tl.setCurrency("KRW");
-                tl.setScannerSource(SCANNER_SOURCE);
-                tradeLogRepo.save(tl);
+        try {
+            txTemplate.execute(new TransactionCallbackWithoutResult() {
+                @Override
+                protected void doInTransactionWithoutResult(TransactionStatus status) {
+                    TradeEntity tl = new TradeEntity();
+                    tl.setTsEpochMs(System.currentTimeMillis());
+                    tl.setSymbol(peSymbol);
+                    tl.setMarketType("KRX");
+                    tl.setAction("SELL");
+                    tl.setPrice(fillPrice);
+                    tl.setQty(qty);
+                    tl.setPnlKrw(fPnlKrw);
+                    tl.setRoiPercent(roiPct);
+                    tl.setMode(cfg.getMode());
+                    tl.setPatternType(ENTRY_STRATEGY);
+                    tl.setPatternReason(signalReason);
+                    tl.setAvgBuyPrice(pe.getAvgPrice().doubleValue());
+                    tl.setCurrency("KRW");
+                    tl.setScannerSource(SCANNER_SOURCE);
+                    tradeLogRepo.save(tl);
 
-                positionRepo.deleteById(peSymbol);
-            }
-        });
+                    positionRepo.deleteById(peSymbol);
+                }
+            });
+        } catch (Exception e) {
+            // DB commit 실패 시 주문은 이미 체결됨 — 로그만 남기고 호출자는 cache 제거하지 않음.
+            // 다음 재시도/재시작에서 reconcile 필요.
+            log.error("[KrxMorningRush] SELL DB commit failed for {} (order was filled at {}): {}",
+                    peSymbol, fillPrice, e.getMessage(), e);
+            addDecision(peSymbol, "SELL", "ERROR", "DB_COMMIT_FAIL",
+                    "Order filled but DB commit failed: " + e.getMessage());
+            return false;
+        }
 
         log.info("[KrxMorningRush] SELL {} price={} pnl={} roi={}% reason={}",
                 peSymbol, fillPrice, String.format("%.0f", fPnlKrw),
                 String.format("%.2f", roiPct), signalReason);
+        return true;
     }
 
     // ========== V34: Split-Exit 1차 분할 매도 ==========
@@ -1480,23 +1598,26 @@ public class KrxMorningRushService {
         if (sellType == null) return;
 
         // race 방어
+        // #4 (2026-04-17): debug → info 로 승격. 경로 명시로 REST/WS 어느 쪽이 먼저 잡았는지 추적.
         if (!sellingSymbols.add(symbol)) {
-            log.debug("[KrxMorningRush] SELL in progress, skip duplicate trigger: {}", symbol);
+            log.info("[KrxMorningRush] WS realtime SELL skip, already in progress by another path (likely REST backup): {}",
+                    symbol);
             return;
         }
 
+        // #3 (2026-04-17): splitFirst가 아닌 일반 매도에서 positionCache 사전 제거 제거.
+        // 이전 구현: WS realtime 경로에서 DB commit 전에 cache 먼저 제거 → LIVE 주문 실패 시 유령 포지션.
+        // 수정: splitPhase 갱신만 여기서 하고, 일반 매도의 cache 제거는 executeSell 성공 후로 이동.
         if (isSplitFirst) {
             // V34: 1차 매도 — 캐시 유지, splitPhase=1로 갱신
             pos[4] = 1.0;    // splitPhase=1
             pos[1] = price;  // peak 리셋 (2차 trail 기준점)
-        } else {
-            positionCache.remove(symbol);
         }
 
         final String fSellType = sellType;
         final String fReason = reason;
         final boolean fIsSplitFirst = isSplitFirst;
-        log.info("[KrxMorningRush] realtime {} detected | {} | {}", fSellType, symbol, fReason);
+        log.info("[KrxMorningRush] realtime path {} detected | {} | {}", fSellType, symbol, fReason);
 
         tpSlExecutor.submit(new Runnable() {
             @Override
@@ -1509,7 +1630,11 @@ public class KrxMorningRushService {
                     if (fIsSplitFirst) {
                         executeSplitFirstSell(fresh, price, fReason, cfg);
                     } else {
-                        executeSell(fresh, price, Signal.of(SignalAction.SELL, null, fReason), cfg);
+                        boolean sold = executeSell(fresh, price, Signal.of(SignalAction.SELL, null, fReason), cfg);
+                        if (sold) {
+                            positionCache.remove(symbol);
+                        }
+                        // 실패 시 cache 유지 → 다음 tick에서 재시도 가능
                     }
                 } catch (Exception e) {
                     log.error("[KrxMorningRush] realtime sell failed for {}", symbol, e);
