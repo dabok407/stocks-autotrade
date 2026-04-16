@@ -59,14 +59,35 @@ public class SymbolNameService {
 
     @PostConstruct
     public void warmUp() {
+        int loaded = 0, resolved = 0;
         try {
+            // 1) symbol_name_cache → memCache
             List<SymbolNameCacheEntity> all = cacheRepo.findAll();
             for (SymbolNameCacheEntity e : all) {
                 if (e.getSymbol() != null && e.getName() != null) {
                     memCache.put(e.getSymbol(), e.getName());
+                    loaded++;
                 }
             }
-            log.info("SymbolNameService warm-up: {} entries loaded from symbol_name_cache", all.size());
+            // 2) trade_log에 등장한 심볼 중 cache 미등록인 것들을 DB 소스(stock_config/rank_log)로 즉시 해결
+            //    KIS 호출 없이 순수 DB — 재시작 직후 첫 API 호출부터 이름이 보이게 함.
+            List<Object[]> pairs = tradeRepo.findDistinctSymbolMarketPairs();
+            if (pairs != null) {
+                for (Object[] row : pairs) {
+                    String sym = (String) row[0];
+                    String mkt = row.length > 1 ? (String) row[1] : "KRX";
+                    if (sym == null || sym.isEmpty()) continue;
+                    if (memCache.containsKey(sym)) continue;
+                    String name = resolveFromConfigOrRankLog(sym);
+                    if (name != null) {
+                        memCache.put(sym, name);
+                        persist(sym, mkt == null ? "KRX" : mkt, name);
+                        resolved++;
+                    }
+                }
+            }
+            log.info("SymbolNameService warm-up: {} from cache, {} resolved from stock_config/rank_log",
+                    loaded, resolved);
         } catch (Exception ex) {
             log.warn("SymbolNameService warm-up failed: {}", ex.getMessage());
         }
