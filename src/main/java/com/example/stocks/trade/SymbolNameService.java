@@ -182,21 +182,26 @@ public class SymbolNameService {
                 persist(sym, mkt, resolved);
                 continue;
             }
-            // KIS 조회 (KRX만)
+            // KIS 조회 (KRX만) — search-stock-info 의 prdt_name 필드 사용
             if (!"KRX".equalsIgnoreCase(mkt)) continue;
             try {
-                Map<String, Object> output = kisPublic.getDomesticCurrentPrice(sym);
-                Object isnm = (output != null) ? output.get("hts_kor_isnm") : null;
-                if (isnm != null) {
-                    String name = String.valueOf(isnm).trim();
-                    if (!name.isEmpty()) {
+                Map<String, Object> output = kisPublic.searchStockInfo(sym);
+                if (output == null || output.isEmpty()) {
+                    log.warn("backfill: KIS search-stock-info returned empty for {}", sym);
+                } else {
+                    Object prdt = output.get("prdt_name");
+                    String name = (prdt == null) ? null : String.valueOf(prdt).trim();
+                    if (name == null || name.isEmpty()) {
+                        log.warn("backfill: KIS response for {} missing prdt_name (keys={})",
+                                sym, output.keySet());
+                    } else {
                         memCache.put(sym, name);
                         persist(sym, mkt, name);
                         log.info("symbol_name_cache backfilled: {} → {}", sym, name);
                     }
                 }
             } catch (Exception ex) {
-                log.debug("backfill KIS lookup failed for {}: {}", sym, ex.getMessage());
+                log.warn("backfill KIS lookup failed for {}: {}", sym, ex.getMessage());
             }
             calls++;
             try { Thread.sleep(KIS_INTER_CALL_SLEEP_MS); } catch (InterruptedException ie) {

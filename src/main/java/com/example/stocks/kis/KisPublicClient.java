@@ -39,6 +39,7 @@ public class KisPublicClient {
     private static final String TR_OVERSEAS_DAY_CANDLE = "HHDFS76240000";
 
     private static final String TR_OVERTIME_UPDOWN_RANK = "FHPST02340000";  // 시간외등락율순위 [국내주식-138]
+    private static final String TR_SEARCH_STOCK_INFO = "CTPF1604R";          // 주식기본조회 (상품명 prdt_name 제공)
 
     private final KisAuth auth;
     private final RestTemplate restTemplate;
@@ -151,6 +152,33 @@ public class KisPublicClient {
             return Collections.emptyMap();
         }
 
+        Object output = body.get("output");
+        if (output instanceof Map) {
+            return (Map<String, Object>) output;
+        }
+        return Collections.emptyMap();
+    }
+
+    /**
+     * 종목 기본정보 조회 (상품명 조회용).
+     * inquire-price 는 종목명을 주지 않으므로 이름 해결은 이 API를 사용한다.
+     *
+     * @param stockCode KRX stock code (e.g. "005930")
+     * @return output map — `prdt_name` 등 포함. 실패 시 emptyMap.
+     */
+    @SuppressWarnings("unchecked")
+    public Map<String, Object> searchStockInfo(String stockCode) {
+        String url = UriComponentsBuilder.fromHttpUrl(props.getEffectiveBaseUrl())
+                .path("/uapi/domestic-stock/v1/quotations/search-stock-info")
+                .queryParam("PDNO", stockCode)
+                .queryParam("PRDT_TYPE_CD", "300")  // 300 = 국내주식
+                .build().toUriString();
+
+        HttpHeaders headers = auth.buildHeaders(TR_SEARCH_STOCK_INFO);
+        Map<String, Object> body = callWithRetry(url, HttpMethod.GET, new HttpEntity<>(headers));
+        if (body == null) {
+            return Collections.emptyMap();
+        }
         Object output = body.get("output");
         if (output instanceof Map) {
             return (Map<String, Object>) output;
