@@ -360,6 +360,13 @@
       strategyLabel.set('TIME_STOP', '시간초과');
       strategyLabel.set('STRATEGY_LOCK', '전략잠금');
       strategyLabel.set('LOW_CONFIDENCE', '신뢰도미달');
+      // 봇 전용 entry strategy 라벨
+      strategyLabel.set('KRX_MORNING_RUSH', 'KRX 모닝러쉬');
+      strategyLabel.set('KRX_OPENING_BREAK', 'KRX 개장 돌파');
+      strategyLabel.set('KRX_HIGH_CONFIDENCE', 'KRX 상시 고확신');
+      strategyLabel.set('NYSE_MORNING_RUSH', 'NYSE 모닝러쉬');
+      strategyLabel.set('NYSE_OPENING_BREAK', 'NYSE 개장 돌파');
+      strategyLabel.set('NYSE_HIGH_CONFIDENCE', 'NYSE 상시 고확신');
     }catch(e){
       strategyCatalog = [];
       strategyLabel = new Map();
@@ -368,6 +375,12 @@
       strategyLabel.set('TIME_STOP', '시간초과');
       strategyLabel.set('STRATEGY_LOCK', '전략잠금');
       strategyLabel.set('LOW_CONFIDENCE', '신뢰도미달');
+      strategyLabel.set('KRX_MORNING_RUSH', 'KRX 모닝러쉬');
+      strategyLabel.set('KRX_OPENING_BREAK', 'KRX 개장 돌파');
+      strategyLabel.set('KRX_HIGH_CONFIDENCE', 'KRX 상시 고확신');
+      strategyLabel.set('NYSE_MORNING_RUSH', 'NYSE 모닝러쉬');
+      strategyLabel.set('NYSE_OPENING_BREAK', 'NYSE 개장 돌파');
+      strategyLabel.set('NYSE_HIGH_CONFIDENCE', 'NYSE 상시 고확신');
     }
 
     // Build intervalLabel map from API
@@ -1287,8 +1300,17 @@
         {value: 'STRATEGY_LOCK', label: '전략잠금'},
         {value: 'LOW_CONFIDENCE', label: '신뢰도미달'}
       ];
+      // 봇 전용 entry strategy (StrategyType enum 외, 주식봇/코인봇 자체 식별자)
+      var BOT_STRATEGIES = [
+        {value: 'KRX_MORNING_RUSH', label: 'KRX 모닝러쉬'},
+        {value: 'KRX_OPENING_BREAK', label: 'KRX 개장 돌파'},
+        {value: 'KRX_HIGH_CONFIDENCE', label: 'KRX 상시 고확신'},
+        {value: 'NYSE_MORNING_RUSH', label: 'NYSE 모닝러쉬'},
+        {value: 'NYSE_OPENING_BREAK', label: 'NYSE 개장 돌파'},
+        {value: 'NYSE_HIGH_CONFIDENCE', label: 'NYSE 상시 고확신'}
+      ];
       var opts = (strategyCatalog || []).map(function(x){ return {value: x.key, label: x.label}; });
-      opts = opts.concat(SYSTEM_TYPES);
+      opts = opts.concat(BOT_STRATEGIES).concat(SYSTEM_TYPES);
       // 기본값: STRATEGY_LOCK 제외한 전부
       var initial = opts.filter(function(o){ return o.value !== 'STRATEGY_LOCK'; }).map(function(o){ return o.value; });
       var root = document.getElementById('logTypeMs');
