@@ -783,8 +783,8 @@
   async function loadTrades(){
     const qs = new URLSearchParams({ page:String(page), size:String(size) }).toString();
     const t = await req(`${API.botTrades}?${qs}`, { method:'GET' });
-    logs = t.items || [];
-    total = t.total ?? null;
+    logs = t.content || t.items || [];
+    total = t.totalElements ?? t.total ?? null;
     logPagerInfo.textContent = `page ${page} · size ${size}${total!=null ? ` · total ${total}` : ''}`;
     nextPageBtn.disabled = (total!=null) ? (page * size >= total) : false;
     prevPageBtn.disabled = (page <= 1);
@@ -1016,7 +1016,7 @@
       // Fetch all trades for chart + strategy perf (separate from paginated logs)
       try {
         var allData = await req(API.botTrades + '?page=1&size=9999', { method: 'GET' });
-        allTradesForChart = allData.items || [];
+        allTradesForChart = allData.content || allData.items || [];
         renderPortfolioChart(allTradesForChart);
         renderStrategyPerf(allTradesForChart);
       } catch(e) { console.warn('Chart/Perf data load failed:', e); }
