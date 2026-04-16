@@ -65,6 +65,10 @@ public class TradeEntity {
     @Column(name = "settlement_date", length = 10)
     private String settlementDate;
 
+    /** DB 비영속. API 응답 직전 enrich 용 (stock_config.displayName or rank_log.symbolName). */
+    @Transient
+    private String symbolName;
+
     // --- Getters & Setters ---
 
     public Long getId() { return id; }
@@ -126,4 +130,7 @@ public class TradeEntity {
 
     public String getSettlementDate() { return settlementDate; }
     public void setSettlementDate(String settlementDate) { this.settlementDate = settlementDate; }
+
+    public String getSymbolName() { return symbolName; }
+    public void setSymbolName(String symbolName) { this.symbolName = symbolName; }
 }

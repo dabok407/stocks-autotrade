@@ -4,7 +4,10 @@ import com.example.stocks.bot.BotStatus;
 import com.example.stocks.bot.TradingBotService;
 import com.example.stocks.db.BotConfigEntity;
 import com.example.stocks.db.BotConfigRepository;
+import com.example.stocks.db.KrxOvertimeRankLogEntity;
+import com.example.stocks.db.KrxOvertimeRankLogRepository;
 import com.example.stocks.db.StockConfigEntity;
+import com.example.stocks.db.StockConfigRepository;
 import com.example.stocks.db.TradeEntity;
 import com.example.stocks.db.TradeRepository;
 import com.example.stocks.exchange.ExchangeAdapter;
@@ -26,13 +29,19 @@ public class BotApiController {
     private final TradeRepository tradeRepo;
     private final ExchangeAdapter exchangeAdapter;
     private final BotConfigRepository botConfigRepo;
+    private final StockConfigRepository stockConfigRepo;
+    private final KrxOvertimeRankLogRepository overtimeRankRepo;
 
     public BotApiController(TradingBotService bot, TradeRepository tradeRepo,
-                            ExchangeAdapter exchangeAdapter, BotConfigRepository botConfigRepo) {
+                            ExchangeAdapter exchangeAdapter, BotConfigRepository botConfigRepo,
+                            StockConfigRepository stockConfigRepo,
+                            KrxOvertimeRankLogRepository overtimeRankRepo) {
         this.bot = bot;
         this.tradeRepo = tradeRepo;
         this.exchangeAdapter = exchangeAdapter;
         this.botConfigRepo = botConfigRepo;
+        this.stockConfigRepo = stockConfigRepo;
+        this.overtimeRankRepo = overtimeRankRepo;
     }
 
     @PostMapping("/api/bot/start")
@@ -122,18 +131,50 @@ public class BotApiController {
             @RequestParam(value = "size", required = false) Integer size
     ) {
         if (page == null || size == null) {
-            return bot.recentTrades();
+            List<TradeEntity> recent = bot.recentTrades();
+            enrichSymbolNames(recent);
+            return recent;
         }
         int p = Math.max(0, page - 1); // API uses 1-based, Spring uses 0-based
         int s = Math.max(1, Math.min(500, size));
         Page<TradeEntity> result = tradeRepo.findAllByOrderByTsEpochMsDesc(PageRequest.of(p, s));
+        List<TradeEntity> rows = result.getContent();
+        enrichSymbolNames(rows);
         Map<String, Object> resp = new LinkedHashMap<String, Object>();
-        resp.put("content", result.getContent());
+        resp.put("content", rows);
         resp.put("totalPages", result.getTotalPages());
         resp.put("totalElements", result.getTotalElements());
         resp.put("page", page);
         resp.put("size", s);
         return resp;
+    }
+
+    /** stock_config.displayName → overtime_rank_log.symbolName 순으로 심볼명 채움. */
+    private void enrichSymbolNames(List<TradeEntity> trades) {
+        if (trades == null || trades.isEmpty()) return;
+        Set<String> symbols = new HashSet<String>();
+        for (TradeEntity t : trades) {
+            if (t.getSymbol() != null) symbols.add(t.getSymbol());
+        }
+        if (symbols.isEmpty()) return;
+
+        Map<String, String> nameMap = new HashMap<String, String>();
+        for (StockConfigEntity sc : stockConfigRepo.findAllById(symbols)) {
+            if (sc.getDisplayName() != null && !sc.getDisplayName().isEmpty()) {
+                nameMap.put(sc.getSymbol(), sc.getDisplayName());
+            }
+        }
+        for (String sym : symbols) {
+            if (nameMap.containsKey(sym)) continue;
+            Optional<KrxOvertimeRankLogEntity> opt = overtimeRankRepo.findFirstBySymbolOrderByIdDesc(sym);
+            if (opt.isPresent() && opt.get().getSymbolName() != null) {
+                nameMap.put(sym, opt.get().getSymbolName());
+            }
+        }
+        for (TradeEntity t : trades) {
+            String name = nameMap.get(t.getSymbol());
+            if (name != null) t.setSymbolName(name);
+        }
     }
 
     @GetMapping("/api/bot/stocks")

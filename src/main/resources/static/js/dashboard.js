@@ -591,7 +591,7 @@
     // Market filter: 종목코드 + 종목명 모두 검색
     if(marketQ) filtered = filtered.filter(function(x){
       var sym = String(x.symbol || x.market || '').toUpperCase();
-      var name = (marketLabel.get(String(x.symbol || x.market || '')) || '').toUpperCase();
+      var name = String(x.symbolName || marketLabel.get(String(x.symbol || x.market || '')) || '').toUpperCase();
       return sym.includes(marketQ) || name.includes(marketQ);
     });
     if(actionQ !== 'ALL') filtered = filtered.filter(x => x.action === actionQ);
@@ -613,7 +613,7 @@
 
     logTbody.innerHTML = filtered.map((x, idx) => {
       const marketCode = x.symbol ?? x.market ?? '-';
-      const marketName = marketLabel.get(String(marketCode));
+      const marketName = x.symbolName || marketLabel.get(String(marketCode));
       const marketText = marketName ? `${marketName} <span style="color:var(--text-muted);font-size:11px">(${marketCode})</span>` : marketCode;
       const actionText = labelAction(x.action);
       const typeKey = x.patternType ?? x.orderType ?? '-';
