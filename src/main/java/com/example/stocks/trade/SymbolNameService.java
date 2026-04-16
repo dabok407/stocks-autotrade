@@ -6,6 +6,7 @@ import com.example.stocks.kis.KisPublicClient;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
 import javax.annotation.PostConstruct;
@@ -15,24 +16,30 @@ import java.util.concurrent.ConcurrentHashMap;
 /**
  * 심볼 → 종목명 해결 서비스.
  *
- * 조회 우선순위:
- *   1) 메모리 캐시 (재시작 시 DB에서 warm-up)
+ * 요청 경로(getName/getNames)는 DB 소스만 사용해 즉시 반환.
+ * KIS 원격 조회는 @Scheduled 백필로 분리되어 rate-limit 경쟁을 피함.
+ *
+ * 조회 우선순위(API 경로):
+ *   1) 메모리 캐시 (기동 시 symbol_name_cache에서 warm-up)
  *   2) symbol_name_cache (영속)
  *   3) stock_config.displayName (수동 등록)
- *   4) krx_overtime_rank_log.symbolName (KRX 모닝러쉬 진입 기록)
- *   5) KIS inquire-price의 hts_kor_isnm (KRX only)
+ *   4) krx_overtime_rank_log.symbolName (모닝러쉬 진입 기록)
  *
- * 2~5단계 hit 시 1), 2)에 자동 기록. 영속 캐시라 재시작 후에도 유지되며,
- * 신규 거래 심볼이 등장하면 자동으로 KIS에서 1회 조회 후 누적.
+ * 백필 루프:
+ *   trade_log의 distinct (symbol, marketType)에서 1~4단계로 미해결인 심볼을
+ *   KIS inquire-price로 1건/500ms 씩 조회해 symbol_name_cache에 영속.
  */
 @Service
 public class SymbolNameService {
 
     private static final Logger log = LoggerFactory.getLogger(SymbolNameService.class);
+    private static final long KIS_INTER_CALL_SLEEP_MS = 500L; // 3 req/s 제한 대비 안전
+    private static final int KIS_MAX_CALLS_PER_RUN = 20;     // 백필 1회당 최대 조회
 
     private final SymbolNameCacheRepository cacheRepo;
     private final StockConfigRepository stockConfigRepo;
     private final KrxOvertimeRankLogRepository overtimeRankRepo;
+    private final TradeRepository tradeRepo;
     private final KisPublicClient kisPublic;
 
     private final ConcurrentHashMap<String, String> memCache = new ConcurrentHashMap<String, String>();
@@ -41,10 +48,12 @@ public class SymbolNameService {
     public SymbolNameService(SymbolNameCacheRepository cacheRepo,
                              StockConfigRepository stockConfigRepo,
                              KrxOvertimeRankLogRepository overtimeRankRepo,
+                             TradeRepository tradeRepo,
                              KisPublicClient kisPublic) {
         this.cacheRepo = cacheRepo;
         this.stockConfigRepo = stockConfigRepo;
         this.overtimeRankRepo = overtimeRankRepo;
+        this.tradeRepo = tradeRepo;
         this.kisPublic = kisPublic;
     }
 
@@ -63,24 +72,23 @@ public class SymbolNameService {
         }
     }
 
-    /** 단건 조회. 알 수 없으면 null 반환. */
-    public String getName(String symbol, String marketType) {
-        if (symbol == null || symbol.isEmpty()) return null;
+    // ═══ API 경로 (동기, KIS 호출 없음) ═══
 
+    /** 단건 조회. DB 소스만 사용. 없으면 null. */
+    public String getName(String symbol) {
+        if (symbol == null || symbol.isEmpty()) return null;
         String hit = memCache.get(symbol);
         if (hit != null) return hit;
-
-        String mkt = (marketType == null || marketType.isEmpty()) ? "KRX" : marketType;
-        String name = resolveMissing(symbol, mkt);
-        if (name != null) {
-            memCache.put(symbol, name);
-            persist(symbol, mkt, name);
+        String resolved = resolveFromDb(symbol);
+        if (resolved != null) {
+            memCache.put(symbol, resolved);
+            persist(symbol, "KRX", resolved);
         }
-        return name;
+        return resolved;
     }
 
-    /** 여러 심볼 일괄 해결. symbol → name 맵(없는 심볼은 미포함). */
-    public Map<String, String> getNames(Collection<String> symbols, Map<String, String> marketBySymbol) {
+    /** 일괄 조회. DB 소스만 사용. */
+    public Map<String, String> getNames(Collection<String> symbols) {
         Map<String, String> result = new HashMap<String, String>();
         if (symbols == null || symbols.isEmpty()) return result;
 
@@ -88,40 +96,32 @@ public class SymbolNameService {
         for (String sym : symbols) {
             if (sym == null || sym.isEmpty()) continue;
             String hit = memCache.get(sym);
-            if (hit != null) {
-                result.put(sym, hit);
-            } else {
-                misses.add(sym);
-            }
+            if (hit != null) result.put(sym, hit);
+            else misses.add(sym);
         }
         if (misses.isEmpty()) return result;
 
-        // DB 영속 캐시에서 배치 조회
-        List<SymbolNameCacheEntity> cached = cacheRepo.findAllById(misses);
-        for (SymbolNameCacheEntity e : cached) {
+        // 영속 캐시 일괄 조회
+        for (SymbolNameCacheEntity e : cacheRepo.findAllById(misses)) {
             if (e.getName() != null) {
                 memCache.put(e.getSymbol(), e.getName());
                 result.put(e.getSymbol(), e.getName());
                 misses.remove(e.getSymbol());
             }
         }
-        if (misses.isEmpty()) return result;
-
-        // 나머지는 stock_config / rank_log / KIS 순으로 개별 해결
+        // stock_config / rank_log 개별 해결
         for (String sym : misses) {
-            String mkt = marketBySymbol != null && marketBySymbol.get(sym) != null
-                    ? marketBySymbol.get(sym) : "KRX";
-            String name = resolveMissing(sym, mkt);
-            if (name != null) {
-                memCache.put(sym, name);
-                persist(sym, mkt, name);
-                result.put(sym, name);
+            String resolved = resolveFromConfigOrRankLog(sym);
+            if (resolved != null) {
+                memCache.put(sym, resolved);
+                persist(sym, "KRX", resolved);
+                result.put(sym, resolved);
             }
         }
         return result;
     }
 
-    /** 외부에서 이미 알고 있는 이름을 수동 등록 (예: 랭킹 수집기). */
+    /** 외부에서 이미 알고 있는 이름 등록 (예: 랭킹 수집기). */
     public void registerIfAbsent(String symbol, String marketType, String name) {
         if (symbol == null || name == null) return;
         if (memCache.containsKey(symbol)) return;
@@ -129,46 +129,90 @@ public class SymbolNameService {
         persist(symbol, marketType == null ? "KRX" : marketType, name);
     }
 
-    // ─── 내부 ────────────────────────────────────────────────
+    // ═══ @Scheduled 백필 (KIS 호출) ═══
 
-    private String resolveMissing(String symbol, String marketType) {
-        // 1) DB 영속 캐시
+    /**
+     * 60초 주기로 trade_log의 미해결 심볼을 KIS로 조회해 캐시에 누적.
+     * 기동 직후 한 번 실행되도록 initialDelay=15초.
+     */
+    @Scheduled(initialDelayString = "15000", fixedDelayString = "60000")
+    public void backfillFromKis() {
+        List<Object[]> pairs;
+        try {
+            pairs = tradeRepo.findDistinctSymbolMarketPairs();
+        } catch (Exception ex) {
+            log.warn("backfill: trade distinct lookup failed: {}", ex.getMessage());
+            return;
+        }
+        if (pairs == null || pairs.isEmpty()) return;
+
+        int calls = 0;
+        for (Object[] row : pairs) {
+            if (calls >= KIS_MAX_CALLS_PER_RUN) break;
+            String sym = (String) row[0];
+            String mkt = row.length > 1 ? (String) row[1] : "KRX";
+            if (sym == null || sym.isEmpty()) continue;
+            if (memCache.containsKey(sym)) continue;
+
+            // 이미 DB/rank/config에 있으면 그걸로 해결하고 KIS 안 부름
+            String resolved = resolveFromDb(sym);
+            if (resolved != null) {
+                memCache.put(sym, resolved);
+                persist(sym, mkt, resolved);
+                continue;
+            }
+            // KIS 조회 (KRX만)
+            if (!"KRX".equalsIgnoreCase(mkt)) continue;
+            try {
+                Map<String, Object> output = kisPublic.getDomesticCurrentPrice(sym);
+                Object isnm = (output != null) ? output.get("hts_kor_isnm") : null;
+                if (isnm != null) {
+                    String name = String.valueOf(isnm).trim();
+                    if (!name.isEmpty()) {
+                        memCache.put(sym, name);
+                        persist(sym, mkt, name);
+                        log.info("symbol_name_cache backfilled: {} → {}", sym, name);
+                    }
+                }
+            } catch (Exception ex) {
+                log.debug("backfill KIS lookup failed for {}: {}", sym, ex.getMessage());
+            }
+            calls++;
+            try { Thread.sleep(KIS_INTER_CALL_SLEEP_MS); } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                break;
+            }
+        }
+        if (calls > 0) {
+            log.info("symbol_name_cache backfill run: {} KIS calls", calls);
+        }
+    }
+
+    // ═══ 내부 ═══
+
+    /** symbol_name_cache → stock_config → rank_log */
+    private String resolveFromDb(String symbol) {
         try {
             Optional<SymbolNameCacheEntity> opt = cacheRepo.findById(symbol);
-            if (opt.isPresent() && opt.get().getName() != null) {
-                return opt.get().getName();
-            }
+            if (opt.isPresent() && opt.get().getName() != null) return opt.get().getName();
         } catch (Exception ex) { /* continue */ }
+        return resolveFromConfigOrRankLog(symbol);
+    }
 
-        // 2) stock_config.displayName
+    /** stock_config.displayName → krx_overtime_rank_log.symbolName (최신) */
+    private String resolveFromConfigOrRankLog(String symbol) {
         try {
             Optional<StockConfigEntity> sc = stockConfigRepo.findById(symbol);
             if (sc.isPresent() && sc.get().getDisplayName() != null && !sc.get().getDisplayName().isEmpty()) {
                 return sc.get().getDisplayName();
             }
         } catch (Exception ex) { /* continue */ }
-
-        // 3) krx_overtime_rank_log (최신)
         try {
             Optional<KrxOvertimeRankLogEntity> opt = overtimeRankRepo.findFirstBySymbolOrderByIdDesc(symbol);
             if (opt.isPresent() && opt.get().getSymbolName() != null && !opt.get().getSymbolName().isEmpty()) {
                 return opt.get().getSymbolName();
             }
         } catch (Exception ex) { /* continue */ }
-
-        // 4) KIS inquire-price (KRX only)
-        if ("KRX".equalsIgnoreCase(marketType)) {
-            try {
-                Map<String, Object> output = kisPublic.getDomesticCurrentPrice(symbol);
-                Object isnm = (output != null) ? output.get("hts_kor_isnm") : null;
-                if (isnm != null) {
-                    String name = String.valueOf(isnm).trim();
-                    if (!name.isEmpty()) return name;
-                }
-            } catch (Exception ex) {
-                log.debug("KIS name lookup failed for {}: {}", symbol, ex.getMessage());
-            }
-        }
         return null;
     }
 

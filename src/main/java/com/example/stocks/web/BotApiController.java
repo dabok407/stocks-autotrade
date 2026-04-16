@@ -144,22 +144,16 @@ public class BotApiController {
         return resp;
     }
 
-    /** 거래내역 심볼명 채움. SymbolNameService 위임 (캐시/DB/KIS 폴백 통합). */
+    /** 거래내역 심볼명 채움. SymbolNameService 위임 (캐시/DB 소스, KIS 백필은 비동기). */
     private void enrichSymbolNames(List<TradeEntity> trades) {
         if (trades == null || trades.isEmpty()) return;
         Set<String> symbols = new HashSet<String>();
-        Map<String, String> marketBySymbol = new HashMap<String, String>();
         for (TradeEntity t : trades) {
-            if (t.getSymbol() != null) {
-                symbols.add(t.getSymbol());
-                if (!marketBySymbol.containsKey(t.getSymbol())) {
-                    marketBySymbol.put(t.getSymbol(), t.getMarketType());
-                }
-            }
+            if (t.getSymbol() != null) symbols.add(t.getSymbol());
         }
         if (symbols.isEmpty()) return;
 
-        Map<String, String> nameMap = symbolNameService.getNames(symbols, marketBySymbol);
+        Map<String, String> nameMap = symbolNameService.getNames(symbols);
         for (TradeEntity t : trades) {
             String name = nameMap.get(t.getSymbol());
             if (name != null) t.setSymbolName(name);
