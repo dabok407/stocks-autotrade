@@ -65,6 +65,7 @@ public class KrxMorningRushService {
     private final TransactionTemplate txTemplate;
     private final ExchangeAdapter exchangeAdapter;
     private final KisPublicClient kisPublic;
+    private final KrxSharedTradeThrottle sharedThrottle;
 
     // ========== Runtime state ==========
 
@@ -97,6 +98,17 @@ public class KrxMorningRushService {
     private volatile KisWebSocketClient.PriceListener wsListener;
     // V34: race condition 방어 (WS + REST 동시 매도 방지)
     private final Set<String> sellingSymbols = ConcurrentHashMap.newKeySet();
+
+    // V39 (2026-04-18) B1: SPLIT_1ST 반복 재시도 폭주 방지.
+    // 운영 사고: 010170 (4/17 09:01~09:05) — placeSellOrder 미체결이 반복되면서
+    //   REST 백업이 매 tick 마다 SPLIT_1ST 재시도 + "SELL EXECUTED" 거짓 decision 38건 발행.
+    //   근본 원인은 (a) executeSplitFirstSell 실패 시에도 caller가 EXECUTED decision을 남김,
+    //   (b) DB 롤백 후 splitPhase=0 복원되어 다음 tick에 즉시 재진입 허용.
+    // 수정:
+    //   1) executeSplitFirstSell 을 boolean 반환으로 변경, caller는 true일 때만 EXECUTED 기록.
+    //   2) 실패 시각을 기록하고 SPLIT_1ST_COOLDOWN_MS 동안 재진입 차단.
+    private final ConcurrentHashMap<String, Long> lastSplitFailMs = new ConcurrentHashMap<String, Long>();
+    static final long SPLIT_1ST_COOLDOWN_MS = 30_000L;
 
     // ── 상태 머신 (V109: 시간 빈틈 버그 근본 해결) ──
     // 기존 boolean 플래그(rangeCollected, entryPhaseComplete) → Phase enum 전환
@@ -162,7 +174,8 @@ public class KrxMorningRushService {
                                   TransactionTemplate txTemplate,
                                   ExchangeAdapter exchangeAdapter,
                                   KisPublicClient kisPublic,
-                                  com.example.stocks.db.KrxOvertimeRankLogRepository overtimeRankRepo) {
+                                  com.example.stocks.db.KrxOvertimeRankLogRepository overtimeRankRepo,
+                                  KrxSharedTradeThrottle sharedThrottle) {
         this.configRepo = configRepo;
         this.botConfigRepo = botConfigRepo;
         this.positionRepo = positionRepo;
@@ -175,6 +188,7 @@ public class KrxMorningRushService {
         this.exchangeAdapter = exchangeAdapter;
         this.kisPublic = kisPublic;
         this.overtimeRankRepo = overtimeRankRepo;
+        this.sharedThrottle = sharedThrottle;
     }
 
     // ========== Restore on restart (2026-04-17 #2) ==========
@@ -417,6 +431,7 @@ public class KrxMorningRushService {
                     avgVolumeMap.clear();
                     tradedSymbols.clear();
                     firstBuyAttemptPrice.clear(); // 2026-04-17 #1
+                    lastSplitFailMs.clear(); // V39 B1: 어제 실패 기록 잔존 방지
                     log.info("[KrxMorningRush] Phase: IDLE → COLLECTING_RANGE (08:50 도달, 신규 데이터 수집 시작)");
                 } else {
                     statusText = "IDLE (outside hours)";
@@ -790,6 +805,16 @@ public class KrxMorningRushService {
                 confirmPriceHistory.remove(symbol);
                 continue;
             }
+            // V39 (2026-04-18) R5: 갭 과열 스킵 — gap ≥ 10% 이면 상한가 주자/차트 뒤쫓기 리스크.
+            // 2026-04-17 184230 gap 17.63% → SPLIT_1ST 반복 트리거 손실 케이스.
+            if (gapPct >= 0.10) {
+                addDecision(symbol, "BUY", "SKIPPED", "GAP_OVERHEATED",
+                        String.format("gap=%.2f%% >= 10%% price=%.0f prevClose=%.0f — 과열 구간",
+                                gapPct * 100, currentPrice, prevClose));
+                confirmCounts.remove(symbol);
+                confirmPriceHistory.remove(symbol);
+                continue;
+            }
 
             // Volume check (REST API 호출이므로 volumeMult > 1.0일 때만 실행)
             if (volumeMultiplier > 1.0) {
@@ -994,12 +1019,19 @@ public class KrxMorningRushService {
             boolean isSplitFirst = false;
 
             // ━━━ V34: Split-Exit 1차 매도 (REST 백업) ━━━
-            if (splitExitEnabled && splitPhase == 0 && pnlPct >= splitTpPct) {
+            // V39 B1: cooldown 체크 — 최근 실패 시 COOLDOWN_MS 동안 재진입 차단
+            Long lastFail = lastSplitFailMs.get(symbol);
+            boolean onCooldown = lastFail != null
+                    && (System.currentTimeMillis() - lastFail) < SPLIT_1ST_COOLDOWN_MS;
+            if (splitExitEnabled && splitPhase == 0 && pnlPct >= splitTpPct && !onCooldown) {
                 sellType = "SPLIT_1ST";
                 isSplitFirst = true;
                 sellReason = String.format(Locale.ROOT,
                         "SPLIT_1ST pnl=+%.2f%% >= %.2f%% avg=%.0f now=%.0f (REST backup)",
                         pnlPct, splitTpPct, avgPrice, currentPrice);
+            } else if (splitExitEnabled && splitPhase == 0 && pnlPct >= splitTpPct && onCooldown) {
+                long waitMs = SPLIT_1ST_COOLDOWN_MS - (System.currentTimeMillis() - lastFail);
+                log.debug("[KrxMorningRush] SPLIT_1ST cooldown skip {} waitMs={}", symbol, waitMs);
             }
             // ━━━ V34: Split 2차 관리 (REST 백업) ━━━
             else if (splitExitEnabled && splitPhase == 1) {
@@ -1093,8 +1125,16 @@ public class KrxMorningRushService {
                 if (fresh == null || fresh.getQty() <= 0) continue;
 
                 if (isSplitFirst) {
-                    executeSplitFirstSell(fresh, currentPrice, sellReason, cfg);
-                    addDecision(symbol, "SELL", "EXECUTED", sellType, sellReason);
+                    // V39 B1: 반환값 기반으로만 EXECUTED 기록. 실패 시 cooldown 기록하여 재진입 차단.
+                    boolean splitOk = executeSplitFirstSell(fresh, currentPrice, sellReason, cfg);
+                    if (splitOk) {
+                        addDecision(symbol, "SELL", "EXECUTED", sellType, sellReason);
+                        lastSplitFailMs.remove(symbol);
+                    } else {
+                        lastSplitFailMs.put(symbol, System.currentTimeMillis());
+                        log.warn("[KrxMorningRush] SPLIT_1ST failed for {} — cooldown {}ms 적용",
+                                symbol, SPLIT_1ST_COOLDOWN_MS);
+                    }
                 } else {
                     // #3 (2026-04-17): cache 제거는 DB commit 성공 후에만.
                     boolean sold = executeSell(fresh, currentPrice, Signal.of(SignalAction.SELL, null, sellReason), cfg);
@@ -1117,6 +1157,16 @@ public class KrxMorningRushService {
 
     private void forceExitAll(KrxMorningRushConfigEntity cfg) {
         List<PositionEntity> allPos = positionRepo.findAll();
+        // V39 B2 (2026-04-18): SESSION_END 진입/결과 로그 강화.
+        // 운영 사고: 4/14 SESSION_END 발생 후 8개 포지션 전량 청산됐지만 SELL 로그가 전혀 없음.
+        //   executeSell 내부의 log.info 는 있으나 entry/exit 가 없어서 "실제 실행됐는지" 판별 불가.
+        //   강화: 시작/종료/결과 카운트를 명시적 로깅하여 사건 재구성 가능하게 함.
+        int target = 0, ok = 0, fail = 0, skipNoPrice = 0;
+        for (PositionEntity pe : allPos) {
+            if (ENTRY_STRATEGY.equals(pe.getEntryStrategy()) && pe.getQty() > 0) target++;
+        }
+        log.info("[KrxMorningRush] forceExitAll START target={} positions", target);
+
         for (PositionEntity pe : allPos) {
             if (!ENTRY_STRATEGY.equals(pe.getEntryStrategy()) || pe.getQty() <= 0) continue;
 
@@ -1129,22 +1179,38 @@ public class KrxMorningRushService {
                     }
                 } catch (Exception e) {
                     log.error("[KrxMorningRush] force exit price fetch failed for {}", pe.getSymbol(), e);
+                    skipNoPrice++;
+                    addDecision(pe.getSymbol(), "SELL", "ERROR", "SESSION_END",
+                            "force exit price fetch failed: " + e.getMessage());
                     continue;
                 }
             }
-            if (currentPrice <= 0) continue;
+            if (currentPrice <= 0) {
+                skipNoPrice++;
+                addDecision(pe.getSymbol(), "SELL", "ERROR", "SESSION_END",
+                        "현재가 0 — 청산 불가");
+                continue;
+            }
 
             // V34: splitPhase=1이면 SPLIT_SESSION_END note 구분
             String reason = pe.getSplitPhase() == 1
                     ? "SPLIT_SESSION_END: 2차 잔량 세션 종료 청산"
                     : "SESSION_END: KRX morning rush session closing";
             // #3 (2026-04-17): 성공한 건만 decision 로그에 EXECUTED 기록.
+            log.info("[KrxMorningRush] forceExitAll TRY {} qty={} avg={} price={}",
+                    pe.getSymbol(), pe.getQty(), pe.getAvgPrice(), currentPrice);
             boolean sold = executeSell(pe, currentPrice, Signal.of(SignalAction.SELL, null, reason), cfg);
             if (sold) {
                 positionCache.remove(pe.getSymbol());
                 addDecision(pe.getSymbol(), "SELL", "EXECUTED", "SESSION_END", reason);
+                ok++;
+            } else {
+                fail++;
+                log.warn("[KrxMorningRush] forceExitAll FAIL {} — position remains", pe.getSymbol());
             }
         }
+        log.info("[KrxMorningRush] forceExitAll DONE target={} ok={} fail={} skipNoPrice={}",
+                target, ok, fail, skipNoPrice);
     }
 
     // ========== Order Execution ==========
@@ -1158,6 +1224,16 @@ public class KrxMorningRushService {
             return false;
         }
 
+        // V39 (2026-04-18) B3: 공유 throttle — MR + Opening Scanner 간 동일 종목 race 차단.
+        // tryClaim = synchronized (canBuy + recordBuy). 실패 시 매수 중단.
+        if (sharedThrottle != null && !sharedThrottle.tryClaim(symbol)) {
+            long waitMs = sharedThrottle.remainingWaitMs(symbol);
+            addDecision(symbol, "BUY", "BLOCKED", "THROTTLED",
+                    String.format("Shared throttle: waitMs=%d (1h 2회/20분 쿨다운)", waitMs));
+            return false;
+        }
+        boolean claimed = sharedThrottle != null;
+
         boolean isPaper = "PAPER".equalsIgnoreCase(cfg.getMode());
         final int qty;
         final double fillPrice;
@@ -1167,18 +1243,21 @@ public class KrxMorningRushService {
             double fee = orderAmount.doubleValue() * 0.00015;
             qty = (int) ((orderAmount.doubleValue() - fee) / fillPrice);
             if (qty <= 0) {
+                if (claimed) sharedThrottle.releaseClaim(symbol);
                 addDecision(symbol, "BUY", "BLOCKED", "QTY_ZERO", "Calculated qty is 0");
                 return false;
             }
         } else {
             int estQty = (int) (orderAmount.doubleValue() / price);
             if (estQty <= 0) {
+                if (claimed) sharedThrottle.releaseClaim(symbol);
                 addDecision(symbol, "BUY", "BLOCKED", "QTY_ZERO", "Estimated qty is 0");
                 return false;
             }
             try {
                 LiveOrderService.LiveOrderResult r = liveOrders.placeBuyOrder(symbol, MarketType.KRX, estQty, price);
                 if (!r.isFilled()) {
+                    if (claimed) sharedThrottle.releaseClaim(symbol);
                     addDecision(symbol, "BUY", "ERROR", "ORDER_NOT_FILLED",
                             String.format("Order not filled state=%s qty=%d", r.state, r.executedQty));
                     return false;
@@ -1186,6 +1265,7 @@ public class KrxMorningRushService {
                 fillPrice = r.avgPrice > 0 ? r.avgPrice : price;
                 qty = r.executedQty > 0 ? r.executedQty : estQty;
             } catch (Exception e) {
+                if (claimed) sharedThrottle.releaseClaim(symbol);
                 addDecision(symbol, "BUY", "ERROR", "ORDER_EXCEPTION", "Order failed: " + e.getMessage());
                 return false;
             }
@@ -1330,13 +1410,16 @@ public class KrxMorningRushService {
      *
      * Dust 처리: 잔량 * 가격 < 50,000원이면 전량 매도.
      * DB 실패 시: cache rollback (splitPhase=0으로 복원).
+     *
+     * V39 B1 (2026-04-18): boolean 반환 — caller 에서 EXECUTED decision 을 성공 시에만 기록.
+     * @return true = 주문 체결 + DB 커밋 성공, false = 미체결/API 미설정/예외/DB 실패
      */
-    private void executeSplitFirstSell(final PositionEntity pe, double price, String reason,
+    private boolean executeSplitFirstSell(final PositionEntity pe, double price, String reason,
                                         final KrxMorningRushConfigEntity cfg) {
         final String symbol = pe.getSymbol();
         if (pe.getSplitPhase() != 0) {
             log.debug("[KrxMorningRush] SPLIT_1ST: already split for {} phase={}", symbol, pe.getSplitPhase());
-            return;
+            return false;
         }
 
         int totalQty = pe.getQty();
@@ -1359,14 +1442,14 @@ public class KrxMorningRushService {
         } else {
             if (!liveOrders.isConfigured()) {
                 addDecision(symbol, "SELL", "BLOCKED", "SPLIT_1ST", "LIVE 모드 API 키 미설정");
-                return;
+                return false;
             }
             try {
                 LiveOrderService.LiveOrderResult r = liveOrders.placeSellOrder(symbol, MarketType.KRX, actualSellQty, price);
                 if (!r.isFilled()) {
                     addDecision(symbol, "SELL", "ERROR", "SPLIT_1ST",
                             String.format("매도 미체결 state=%s qty=%d", r.state, r.executedQty));
-                    return;
+                    return false;
                 }
                 fillPrice = r.avgPrice > 0 ? r.avgPrice : price;
                 if (r.executedQty > 0 && r.executedQty != actualSellQty) {
@@ -1377,7 +1460,7 @@ public class KrxMorningRushService {
             } catch (Exception e) {
                 log.error("[KrxMorningRush] SPLIT_1ST sell failed for {}", symbol, e);
                 addDecision(symbol, "SELL", "ERROR", "SPLIT_1ST", "매도 실패: " + e.getMessage());
-                return;
+                return false;
             }
         }
 
@@ -1434,7 +1517,7 @@ public class KrxMorningRushService {
                 rollback[4] = 0;  // splitPhase → 0 복원
             }
             addDecision(symbol, "SELL", "ERROR", "SPLIT_1ST", "DB 실패, cache 롤백: " + e.getMessage());
-            return;
+            return false;
         }
 
         if (isDust) {
@@ -1448,6 +1531,7 @@ public class KrxMorningRushService {
         }
 
         addDecision(symbol, "SELL", "EXECUTED", "SPLIT_1ST", fReason);
+        return true;
     }
 
     // ========== Helpers ==========
@@ -1523,7 +1607,11 @@ public class KrxMorningRushService {
         boolean isSplitFirst = false;
 
         // ━━━ V34: Split-Exit 1차 매도 (splitPhase=0, +splitTpPct 도달) ━━━
-        if (cachedSplitExitEnabled && splitPhase == 0 && pnlPct >= cachedSplitTpPct) {
+        // V39 B1: cooldown 체크 — REST 백업 실패가 누적되면 realtime 도 함께 억제
+        Long lastFailMs = lastSplitFailMs.get(symbol);
+        boolean splitOnCooldown = lastFailMs != null
+                && (System.currentTimeMillis() - lastFailMs) < SPLIT_1ST_COOLDOWN_MS;
+        if (cachedSplitExitEnabled && splitPhase == 0 && pnlPct >= cachedSplitTpPct && !splitOnCooldown) {
             sellType = "SPLIT_1ST";
             isSplitFirst = true;
             reason = String.format(java.util.Locale.ROOT,
@@ -1628,7 +1716,18 @@ public class KrxMorningRushService {
                     if (!ENTRY_STRATEGY.equals(fresh.getEntryStrategy())) return;
                     KrxMorningRushConfigEntity cfg = configRepo.loadOrCreate();
                     if (fIsSplitFirst) {
-                        executeSplitFirstSell(fresh, price, fReason, cfg);
+                        // V39 B1: 반환값 활용 — 실패 시 cooldown 기록 + cache 롤백
+                        boolean splitOk = executeSplitFirstSell(fresh, price, fReason, cfg);
+                        if (splitOk) {
+                            lastSplitFailMs.remove(symbol);
+                        } else {
+                            lastSplitFailMs.put(symbol, System.currentTimeMillis());
+                            // cache 롤백 (realtime 경로는 pos[4]=1.0 미리 설정했으므로 복원)
+                            double[] p = positionCache.get(symbol);
+                            if (p != null && p.length >= 5) p[4] = 0.0;
+                            log.warn("[KrxMorningRush] SPLIT_1ST (realtime) failed for {} — cooldown {}ms 적용",
+                                    symbol, SPLIT_1ST_COOLDOWN_MS);
+                        }
                     } else {
                         boolean sold = executeSell(fresh, price, Signal.of(SignalAction.SELL, null, fReason), cfg);
                         if (sold) {

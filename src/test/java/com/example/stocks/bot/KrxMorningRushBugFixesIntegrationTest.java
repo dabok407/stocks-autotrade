@@ -70,7 +70,7 @@ public class KrxMorningRushBugFixesIntegrationTest {
         service = new KrxMorningRushService(
                 configRepo, botConfigRepo, positionRepo, tradeLogRepo,
                 liveOrders, tickerService, candleService, kisWs, txTemplate,
-                exchangeAdapter, kisPublic, overtimeRankRepo
+                exchangeAdapter, kisPublic, overtimeRankRepo, new KrxSharedTradeThrottle()
         );
         cfg = buildConfig();
         when(configRepo.loadOrCreate()).thenReturn(cfg);
@@ -298,24 +298,27 @@ public class KrxMorningRushBugFixesIntegrationTest {
     // ═══════════════════════════════════════════════════════════
 
     @Test
-    @DisplayName("#1-a: firstBuyAttemptPrice 기록 상태 + 가격 +11% 재시도 → RETRY_PRICE_DRIFT")
+    @DisplayName("#1-a: firstBuyAttemptPrice 기록 상태 + 가격 +2.5% 재시도 → RETRY_PRICE_DRIFT")
     public void test1_scanForEntry_retryDriftBlocked() throws Exception {
+        // V39 R5 (2026-04-18): gap 과열(>=10%) 차단 도입으로 prices 재설정.
+        //   기존: prev=20000, first=22500, now=25000 → gap 25% → GAP_OVERHEATED 로 먼저 걸림.
+        //   변경: prev=20000, first=20500, now=21000 → gap 5% (통과), drift +2.44% → RETRY_PRICE_DRIFT.
         String sym = "072950";
         double prev = 20000;
         getPrevCloseMap().put(sym, prev);
 
-        // 이전 사이클에서 첫 시도가 22500에 일어났다고 가정
-        getFirstBuyAttemptPrice().put(sym, 22500.0);
+        // 이전 사이클에서 첫 시도가 20500에 일어났다고 가정 (gap 2.5%, threshold 2% 통과)
+        getFirstBuyAttemptPrice().put(sym, 20500.0);
 
-        // 재시도 — 25000 (+11.1%) 3회 confirm
-        when(kisWs.getLatestPrice(sym)).thenReturn(25000.0, 25000.0, 25000.0);
+        // 재시도 — 21000 (prev 대비 +5%, first 대비 +2.44%) → drift 2% 초과로 차단
+        when(kisWs.getLatestPrice(sym)).thenReturn(21000.0, 21000.0, 21000.0);
 
         invokeScanForEntry();
         invokeScanForEntry();
         invokeScanForEntry();
 
         assertEquals("RETRY_PRICE_DRIFT", latestReasonCodeFor(sym),
-                "첫 시도 22500 대비 25000(+11.1%) drift → 차단");
+                "첫 시도 20500 대비 21000(+2.44%) drift → 차단");
 
         // RETRY_PRICE_DRIFT 발생 시 tradedSymbols.add로 재시도 완전 봉쇄
         assertTrue(getTradedSymbols().contains(sym),

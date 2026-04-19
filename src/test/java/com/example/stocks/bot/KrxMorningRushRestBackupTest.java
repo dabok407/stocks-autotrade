@@ -84,7 +84,7 @@ public class KrxMorningRushRestBackupTest {
         service = new KrxMorningRushService(
                 configRepo, botConfigRepo, positionRepo, tradeLogRepo,
                 liveOrders, tickerService, candleService, kisWs, txTemplate,
-                exchangeAdapter, kisPublic, overtimeRankRepo
+                exchangeAdapter, kisPublic, overtimeRankRepo, new KrxSharedTradeThrottle()
         );
         setField("running", new AtomicBoolean(true));
 

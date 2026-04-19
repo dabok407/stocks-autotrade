@@ -49,6 +49,7 @@ public class KrxOpeningScannerService {
     private final StrategyFactory strategyFactory;
     private final TransactionTemplate txTemplate;
     private final ExchangeAdapter exchangeAdapter;
+    private final KrxSharedTradeThrottle sharedThrottle;
 
     private final AtomicBoolean running = new AtomicBoolean(false);
     private volatile ScheduledExecutorService scheduler;
@@ -118,7 +119,8 @@ public class KrxOpeningScannerService {
                                      LiveOrderService liveOrders,
                                      TickerService tickerService,
                                      TransactionTemplate txTemplate, StrategyFactory strategyFactory,
-                                     ExchangeAdapter exchangeAdapter) {
+                                     ExchangeAdapter exchangeAdapter,
+                                     KrxSharedTradeThrottle sharedThrottle) {
         this.configRepo = configRepo;
         this.botConfigRepo = botConfigRepo;
         this.positionRepo = positionRepo;
@@ -129,6 +131,7 @@ public class KrxOpeningScannerService {
         this.txTemplate = txTemplate;
         this.strategyFactory = strategyFactory;
         this.exchangeAdapter = exchangeAdapter;
+        this.sharedThrottle = sharedThrottle;
     }
 
     // ========== Decision Log ==========
@@ -544,6 +547,15 @@ public class KrxOpeningScannerService {
             return;
         }
 
+        // V39 (2026-04-18) B3: MR 과 공유 throttle — 동일 종목 2중 매수 차단.
+        if (sharedThrottle != null && !sharedThrottle.tryClaim(symbol)) {
+            long waitMs = sharedThrottle.remainingWaitMs(symbol);
+            addDecision(symbol, "BUY", "BLOCKED", "THROTTLED",
+                    String.format("Shared throttle: waitMs=%d (1h 2회/20분 쿨다운)", waitMs));
+            return;
+        }
+        boolean claimed = sharedThrottle != null;
+
         boolean isPaper = "PAPER".equalsIgnoreCase(cfg.getMode());
         int qty;
         double fillPrice;
@@ -553,22 +565,26 @@ public class KrxOpeningScannerService {
             double fee = orderAmount.doubleValue() * 0.00015; // stock fee ~0.015%
             qty = (int) ((orderAmount.doubleValue() - fee) / fillPrice);
             if (qty <= 0) {
+                if (claimed) sharedThrottle.releaseClaim(symbol);
                 addDecision(symbol, "BUY", "BLOCKED", "QTY_ZERO", "Calculated qty is 0");
                 return;
             }
         } else {
             if (!liveOrders.isConfigured()) {
+                if (claimed) sharedThrottle.releaseClaim(symbol);
                 addDecision(symbol, "BUY", "BLOCKED", "API_KEY_MISSING", "LIVE mode API not configured");
                 return;
             }
             int estQty = (int) (orderAmount.doubleValue() / price);
             if (estQty <= 0) {
+                if (claimed) sharedThrottle.releaseClaim(symbol);
                 addDecision(symbol, "BUY", "BLOCKED", "QTY_ZERO", "Estimated qty is 0");
                 return;
             }
             try {
                 LiveOrderService.LiveOrderResult r = liveOrders.placeBuyOrder(symbol, MarketType.KRX, estQty, price);
                 if (!r.isFilled()) {
+                    if (claimed) sharedThrottle.releaseClaim(symbol);
                     addDecision(symbol, "BUY", "ERROR", "ORDER_NOT_FILLED",
                             String.format("Order not filled state=%s qty=%d", r.state, r.executedQty));
                     return;
@@ -576,6 +592,7 @@ public class KrxOpeningScannerService {
                 fillPrice = r.avgPrice > 0 ? r.avgPrice : price;
                 qty = r.executedQty > 0 ? r.executedQty : estQty;
             } catch (Exception e) {
+                if (claimed) sharedThrottle.releaseClaim(symbol);
                 addDecision(symbol, "BUY", "ERROR", "ORDER_EXCEPTION", "Order failed: " + e.getMessage());
                 return;
             }

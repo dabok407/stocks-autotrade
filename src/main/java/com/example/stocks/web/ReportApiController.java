@@ -48,16 +48,43 @@ public class ReportApiController {
     }
 
     /**
-     * 전일 전체 거래 최종 리포트 (자정 스케줄용).
-     * 어제 전체 거래 반환.
+     * 일일 리포트 (스케줄러/텔레그램 전송용).
+     *
+     * V39 B5 (2026-04-18): 운영 사고 — 자정 스케줄러가 자정 직후(00:00~00:05) 호출하면
+     *   LocalDate.now().minusDays(1) = 어제 → 어제 트레이드 반환. 정상.
+     *   그러나 장중 테스트(예: 10:00 KST)로 호출 시 "어제" 데이터만 나와 빈 결과 보임.
+     *   → date 파라미터 오버라이드 추가 (today/yesterday/YYYY-MM-DD).
+     *
+     * 쿼리 파라미터:
+     *   - date=today         → 오늘 KST
+     *   - date=yesterday     → 어제 KST (기본값, 자정 이후 스케줄러 호출)
+     *   - date=YYYY-MM-DD    → 지정 날짜
+     *   - 미지정              → 어제 (기존 동작 유지)
      */
     @GetMapping("/daily")
-    public ResponseEntity<?> dailyReport(@RequestHeader(value = "X-API-Key", required = false) String apiKey) {
+    public ResponseEntity<?> dailyReport(
+            @RequestHeader(value = "X-API-Key", required = false) String apiKey,
+            @RequestParam(value = "date", required = false) String dateParam) {
         ResponseEntity<?> authCheck = checkApiKey(apiKey);
         if (authCheck != null) return authCheck;
 
-        LocalDate yesterday = LocalDate.now(ZoneId.of("Asia/Seoul")).minusDays(1);
-        return ResponseEntity.ok(buildReport("all", yesterday));
+        LocalDate target;
+        LocalDate todayKst = LocalDate.now(ZoneId.of("Asia/Seoul"));
+        if (dateParam == null || dateParam.isEmpty() || "yesterday".equalsIgnoreCase(dateParam)) {
+            target = todayKst.minusDays(1);
+        } else if ("today".equalsIgnoreCase(dateParam)) {
+            target = todayKst;
+        } else {
+            try {
+                target = LocalDate.parse(dateParam);
+            } catch (Exception e) {
+                Map<String, String> err = new HashMap<String, String>();
+                err.put("error", "INVALID_DATE");
+                err.put("message", "date 는 today/yesterday 또는 YYYY-MM-DD 형식이어야 합니다. 받은 값: " + dateParam);
+                return ResponseEntity.badRequest().body(err);
+            }
+        }
+        return ResponseEntity.ok(buildReport("all", target));
     }
 
     /**
