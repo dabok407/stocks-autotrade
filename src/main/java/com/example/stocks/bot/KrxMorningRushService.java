@@ -942,34 +942,12 @@ public class KrxMorningRushService {
     // ========== Position Monitoring (TP/SL/TimeStop) ==========
 
     /**
-     * V34: REST 폴링 기반 TP/SL 모니터링 (WebSocket 실시간의 백업).
-     * WebSocket이 끊기거나 지연될 때를 대비한 안전장치.
-     * Split-Exit + TP_TRAIL + 티어드 SL 통합 (checkRealtimeTpSl과 동일 우선순위).
-     *
-     * 우선순위:
-     * 1. Split-Exit (splitExitEnabled)
-     *    · splitPhase=0 + pnl >= splitTpPct → SPLIT_1ST
-     *    · splitPhase=1 → breakeven(SPLIT_2ND_BEV) 또는 trail drop(SPLIT_2ND_TRAIL)
-     * 2. TP_TRAIL (splitExit 비활성 시)
-     *    · 수익 +tpTrailActivatePct 도달 → trail 활성, peak 대비 drop 시 매도
-     * 3. 티어드 SL (TP_TRAIL 미발동 시)
-     *    · Grace → Wide → Tight
-     * 4. TIME_STOP
+     * V40 (2026-04-20): REST 폴링 — peak 업데이트 + POS_STATUS 로그 + TIME_STOP 만 담당.
+     * SL/TP 판정은 WebSocket realtime(checkRealtimeTpSl) 단독 책임.
      */
     private void monitorPositions(KrxMorningRushConfigEntity cfg) {
         List<PositionEntity> allPos = positionRepo.findAll();
         int timeStopMin = cfg.getTimeStopMin();
-
-        // 파라미터 (realtime checkRealtimeTpSl과 동일)
-        long gracePeriodMs = cfg.getGracePeriodSec() * 1000L;
-        long widePeriodMs = cfg.getWidePeriodMin() * 60_000L;
-        double wideSlPct = cfg.getWideSlPct().doubleValue();
-        double tightSlPct = cfg.getSlPct().doubleValue();
-        double tpTrailActivatePct = cfg.getTpTrailActivatePct().doubleValue();
-        double tpTrailDropPct = cfg.getTpTrailDropPct().doubleValue();
-        boolean splitExitEnabled = cfg.isSplitExitEnabled();
-        double splitTpPct = cfg.getSplitTpPct().doubleValue();
-        double trailDropAfterSplit = cfg.getTrailDropAfterSplit().doubleValue();
 
         for (PositionEntity pe : allPos) {
             if (!ENTRY_STRATEGY.equals(pe.getEntryStrategy()) || pe.getQty() <= 0) continue;
@@ -1014,135 +992,34 @@ public class KrxMorningRushService {
                     String.format(Locale.ROOT, "price=%.0f avg=%.0f pnl=%.2f%% elapsed=%dmin split=%d trail=%s",
                             currentPrice, avgPrice, pnlPct, elapsedMinTotal, splitPhase, trailActivated));
 
-            String sellReason = null;
-            String sellType = null;
-            boolean isSplitFirst = false;
+            // V40 (2026-04-20): REST 경로는 TIME_STOP 만 담당.
+            // SL/TP 는 WebSocket realtime(checkRealtimeTpSl) 단독 책임.
+            // 제거 이유: Grace 종료 직후 REST 5초 폴링이 WS 다음 틱보다 먼저 SL 판정하여
+            //            V자 반등 직전 -2~-3% 에서 조기 청산되는 패턴 관측됨.
+            if (pe.getOpenedAt() == null || timeStopMin <= 0) continue;
+            if (elapsedMinTotal < timeStopMin || pnlPct >= 0) continue;
 
-            // ━━━ V34: Split-Exit 1차 매도 (REST 백업) ━━━
-            // V39 B1: cooldown 체크 — 최근 실패 시 COOLDOWN_MS 동안 재진입 차단
-            Long lastFail = lastSplitFailMs.get(symbol);
-            boolean onCooldown = lastFail != null
-                    && (System.currentTimeMillis() - lastFail) < SPLIT_1ST_COOLDOWN_MS;
-            if (splitExitEnabled && splitPhase == 0 && pnlPct >= splitTpPct && !onCooldown) {
-                sellType = "SPLIT_1ST";
-                isSplitFirst = true;
-                sellReason = String.format(Locale.ROOT,
-                        "SPLIT_1ST pnl=+%.2f%% >= %.2f%% avg=%.0f now=%.0f (REST backup)",
-                        pnlPct, splitTpPct, avgPrice, currentPrice);
-            } else if (splitExitEnabled && splitPhase == 0 && pnlPct >= splitTpPct && onCooldown) {
-                long waitMs = SPLIT_1ST_COOLDOWN_MS - (System.currentTimeMillis() - lastFail);
-                log.debug("[KrxMorningRush] SPLIT_1ST cooldown skip {} waitMs={}", symbol, waitMs);
-            }
-            // ━━━ V34: Split 2차 관리 (REST 백업) ━━━
-            else if (splitExitEnabled && splitPhase == 1) {
-                if (pnlPct <= 0) {
-                    sellType = "SPLIT_2ND_BEV";
-                    sellReason = String.format(Locale.ROOT,
-                            "SPLIT_2ND_BEV pnl=%.2f%% <= 0%% avg=%.0f now=%.0f (REST backup)",
-                            pnlPct, avgPrice, currentPrice);
-                } else if (peakPrice > avgPrice) {
-                    double dropFromPeakPct = (peakPrice - currentPrice) / peakPrice * 100.0;
-                    if (dropFromPeakPct >= trailDropAfterSplit) {
-                        sellType = "SPLIT_2ND_TRAIL";
-                        sellReason = String.format(Locale.ROOT,
-                                "SPLIT_2ND_TRAIL peak=%.0f now=%.0f drop=%.2f%% >= %.2f%% (REST backup)",
-                                peakPrice, currentPrice, dropFromPeakPct, trailDropAfterSplit);
-                    }
-                }
-            }
-            // ━━━ TP_TRAIL + 티어드 SL (splitExit 비활성 시, REST 백업) ━━━
-            else {
-                // TP_TRAIL 활성화 체크
-                if (!trailActivated && pnlPct >= tpTrailActivatePct) {
-                    trailActivated = true;
-                    if (cached != null) cached[2] = 1.0;
-                    log.info("[KrxMorningRush] TP_TRAIL activated: {} pnl=+{}% peak={} (REST backup)",
-                            symbol, String.format(Locale.ROOT, "%.2f", pnlPct), currentPrice);
-                }
-
-                // TP_TRAIL 매도 체크
-                if (trailActivated) {
-                    double dropFromPeak = (peakPrice - currentPrice) / peakPrice * 100.0;
-                    if (dropFromPeak >= tpTrailDropPct) {
-                        sellType = "TP_TRAIL";
-                        sellReason = String.format(Locale.ROOT,
-                                "TP_TRAIL peak=%.0f now=%.0f drop=%.2f%% pnl=%.2f%% (REST backup)",
-                                peakPrice, currentPrice, dropFromPeak, pnlPct);
-                    }
-                }
-
-                // 티어드 SL (TP_TRAIL 미발동 시)
-                if (sellReason == null) {
-                    if (elapsedMs < gracePeriodMs) {
-                        if (pnlPct <= -10.0) {
-                            sellType = "SL_EMERGENCY";
-                            sellReason = String.format(Locale.ROOT,
-                                    "SL_EMERGENCY pnl=%.2f%% price=%.0f avg=%.0f (grace, REST backup)",
-                                    pnlPct, currentPrice, avgPrice);
-                        }
-                    } else if (elapsedMs < widePeriodMs) {
-                        if (pnlPct <= -wideSlPct) {
-                            sellType = "SL_WIDE";
-                            sellReason = String.format(Locale.ROOT,
-                                    "SL_WIDE pnl=%.2f%% <= -%.2f%% price=%.0f avg=%.0f elapsed=%ds (REST backup)",
-                                    pnlPct, wideSlPct, currentPrice, avgPrice, elapsedMs / 1000);
-                        }
-                    } else {
-                        if (pnlPct <= -tightSlPct) {
-                            sellType = "SL_TIGHT";
-                            sellReason = String.format(Locale.ROOT,
-                                    "SL_TIGHT pnl=%.2f%% <= -%.2f%% price=%.0f avg=%.0f elapsed=%ds (REST backup)",
-                                    pnlPct, tightSlPct, currentPrice, avgPrice, elapsedMs / 1000);
-                        }
-                    }
-                }
-            }
-
-            // Time stop (SL 미발동 시)
-            if (sellReason == null && pe.getOpenedAt() != null && timeStopMin > 0) {
-                if (elapsedMinTotal >= timeStopMin && pnlPct < 0) {
-                    sellType = "TIME_STOP";
-                    sellReason = String.format(Locale.ROOT,
-                            "TIME_STOP: %dmin elapsed (limit=%d), pnl=%.2f%% price=%.0f",
-                            elapsedMinTotal, timeStopMin, pnlPct, currentPrice);
-                }
-            }
-
-            if (sellReason == null) continue;
+            String sellReason = String.format(Locale.ROOT,
+                    "TIME_STOP: %dmin elapsed (limit=%d), pnl=%.2f%% price=%.0f",
+                    elapsedMinTotal, timeStopMin, pnlPct, currentPrice);
 
             // race 방어: WS realtime과 REST monitorPositions 동시 매도 방지
-            // #4 (2026-04-17): debug → info 로 승격하여 운영에서 race 발생 시 관측 가능하게 함.
             if (!sellingSymbols.add(symbol)) {
                 log.info("[KrxMorningRush] REST SELL skip, already in progress by another path (likely WS realtime): {} reason={}",
                         symbol, sellReason);
                 continue;
             }
 
-            log.info("[KrxMorningRush] REST path {} triggered | {} | {}", sellType, symbol, sellReason);
+            log.info("[KrxMorningRush] REST path TIME_STOP triggered | {} | {}", symbol, sellReason);
 
             try {
                 PositionEntity fresh = positionRepo.findById(symbol).orElse(null);
                 if (fresh == null || fresh.getQty() <= 0) continue;
 
-                if (isSplitFirst) {
-                    // V39 B1: 반환값 기반으로만 EXECUTED 기록. 실패 시 cooldown 기록하여 재진입 차단.
-                    boolean splitOk = executeSplitFirstSell(fresh, currentPrice, sellReason, cfg);
-                    if (splitOk) {
-                        addDecision(symbol, "SELL", "EXECUTED", sellType, sellReason);
-                        lastSplitFailMs.remove(symbol);
-                    } else {
-                        lastSplitFailMs.put(symbol, System.currentTimeMillis());
-                        log.warn("[KrxMorningRush] SPLIT_1ST failed for {} — cooldown {}ms 적용",
-                                symbol, SPLIT_1ST_COOLDOWN_MS);
-                    }
-                } else {
-                    // #3 (2026-04-17): cache 제거는 DB commit 성공 후에만.
-                    boolean sold = executeSell(fresh, currentPrice, Signal.of(SignalAction.SELL, null, sellReason), cfg);
-                    if (sold) {
-                        positionCache.remove(symbol);
-                        addDecision(symbol, "SELL", "EXECUTED", sellType, sellReason);
-                    }
-                    // sold == false 인 경우 executeSell 내부에서 이미 ERROR 로그 + addDecision 기록됨.
+                boolean sold = executeSell(fresh, currentPrice, Signal.of(SignalAction.SELL, null, sellReason), cfg);
+                if (sold) {
+                    positionCache.remove(symbol);
+                    addDecision(symbol, "SELL", "EXECUTED", "TIME_STOP", sellReason);
                 }
             } catch (Exception e) {
                 log.error("[KrxMorningRush] REST sell failed for {}", symbol, e);
