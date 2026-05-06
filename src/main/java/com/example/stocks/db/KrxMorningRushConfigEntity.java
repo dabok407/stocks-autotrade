@@ -119,6 +119,10 @@ public class KrxMorningRushConfigEntity {
     @Column(name = "reserve_krw", nullable = false)
     private long reserveKrw = 30000L;
 
+    /** V42 (2026-05-06): 봇이 만든 stuck 포지션 자동 청산 활성화. */
+    @Column(name = "auto_cleanup_stuck_enabled", nullable = false)
+    private boolean autoCleanupStuckEnabled = true;
+
     // ========== Getters & Setters ==========
 
     public int getId() { return id; }
@@ -216,6 +220,9 @@ public class KrxMorningRushConfigEntity {
 
     public long getReserveKrw() { return reserveKrw; }
     public void setReserveKrw(long v) { this.reserveKrw = Math.max(0, v); }
+
+    public boolean isAutoCleanupStuckEnabled() { return autoCleanupStuckEnabled; }
+    public void setAutoCleanupStuckEnabled(boolean v) { this.autoCleanupStuckEnabled = v; }
 
     /** Excluded symbols as Set (CSV parsed) */
     public Set<String> getExcludeSymbolsSet() {
