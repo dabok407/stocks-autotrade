@@ -57,6 +57,15 @@ public class LiveOrderService {
      * @return 주문 결과
      */
     public LiveOrderResult placeBuyOrder(String symbol, MarketType marketType, int qty, double price) {
+        return placeBuyOrder(symbol, marketType, qty, price, "00");
+    }
+
+    /**
+     * 매수 주문 (주문구분 지정).
+     *
+     * @param ordType "00"=지정가, "01"=시장가
+     */
+    public LiveOrderResult placeBuyOrder(String symbol, MarketType marketType, int qty, double price, String ordType) {
         String identifier = newIdentifier();
         double tickPrice = TickSizeUtil.roundToTickSize(price, marketType);
 
@@ -66,17 +75,17 @@ public class LiveOrderService {
         order.setSymbol(symbol);
         order.setMarketType(marketType.name());
         order.setSide("BUY");
-        order.setOrdType("00"); // 지정가
+        order.setOrdType(ordType);
         order.setPrice(BigDecimal.valueOf(tickPrice));
         order.setQty(qty);
         order.setState("wait");
         order.setTsEpochMs(System.currentTimeMillis());
         orderRepo.save(order);
 
-        log.info("[LIVE] BUY order via {}: symbol={}, market={}, qty={}, price={}",
-                exchange.getName(), symbol, marketType, qty, tickPrice);
+        log.info("[LIVE] BUY order via {}: symbol={}, market={}, qty={}, price={}, ordType={}",
+                exchange.getName(), symbol, marketType, qty, tickPrice, ordType);
 
-        OrderResult result = exchange.placeBuyOrder(symbol, marketType, qty, tickPrice);
+        OrderResult result = exchange.placeBuyOrder(symbol, marketType, qty, tickPrice, ordType);
         return processOrderResult(identifier, result, order);
     }
 
@@ -90,6 +99,18 @@ public class LiveOrderService {
      * @return 주문 결과
      */
     public LiveOrderResult placeSellOrder(String symbol, MarketType marketType, int qty, double price) {
+        return placeSellOrder(symbol, marketType, qty, price, "00");
+    }
+
+    /**
+     * 매도 주문 (주문구분 지정 — P0-Fix#2).
+     *
+     * SL/SL_WIDE/TIME_STOP/SESSION_END 같이 시간이 중요한 청산은 ordType="01"(시장가) 사용.
+     * TP_TRAIL/SPLIT_1ST 같은 익절은 ordType="00"(지정가) 유지.
+     *
+     * @param ordType "00"=지정가, "01"=시장가
+     */
+    public LiveOrderResult placeSellOrder(String symbol, MarketType marketType, int qty, double price, String ordType) {
         String identifier = newIdentifier();
         double tickPrice = TickSizeUtil.roundToTickSize(price, marketType);
 
@@ -98,17 +119,17 @@ public class LiveOrderService {
         order.setSymbol(symbol);
         order.setMarketType(marketType.name());
         order.setSide("SELL");
-        order.setOrdType("00"); // 지정가
+        order.setOrdType(ordType);
         order.setPrice(BigDecimal.valueOf(tickPrice));
         order.setQty(qty);
         order.setState("wait");
         order.setTsEpochMs(System.currentTimeMillis());
         orderRepo.save(order);
 
-        log.info("[LIVE] SELL order via {}: symbol={}, market={}, qty={}, price={}",
-                exchange.getName(), symbol, marketType, qty, tickPrice);
+        log.info("[LIVE] SELL order via {}: symbol={}, market={}, qty={}, price={}, ordType={}",
+                exchange.getName(), symbol, marketType, qty, tickPrice, ordType);
 
-        OrderResult result = exchange.placeSellOrder(symbol, marketType, qty, tickPrice);
+        OrderResult result = exchange.placeSellOrder(symbol, marketType, qty, tickPrice, ordType);
         return processOrderResult(identifier, result, order);
     }
 
@@ -158,15 +179,26 @@ public class LiveOrderService {
         int executedQty = result.getQty();
         double avgPrice = result.getPrice();
 
+        // P0-Fix#1 (V41 2026-05-06): PENDING 은 미체결로 처리 — DB state="pending", LiveOrderResult.state="pending"
+        // → 호출자 isFilled() = false → 포지션 미삭제, 다음 사이클에서 재시도/에스컬레이션.
+        boolean isPending = result.getStatus() == OrderResult.Status.PENDING;
+        String state = isPending ? "pending" : "done";
+
         order.setUuid(ordNo);
-        order.setState("done");
+        order.setState(state);
         order.setExecutedVolume(executedQty);
         order.setAvgPrice(BigDecimal.valueOf(avgPrice));
         order.setTsEpochMs(System.currentTimeMillis());
         orderRepo.save(order);
 
-        log.info("[LIVE] Order accepted: ordNo={}, symbol={}", ordNo, order.getSymbol());
-        return new LiveOrderResult(identifier, ordNo, "done", executedQty, avgPrice);
+        if (isPending) {
+            log.warn("[LIVE] Order PENDING (not filled): ordNo={}, symbol={}, msg={}",
+                    ordNo, order.getSymbol(), result.getMessage());
+        } else {
+            log.info("[LIVE] Order filled: ordNo={}, symbol={}, qty={}, avg={}",
+                    ordNo, order.getSymbol(), executedQty, avgPrice);
+        }
+        return new LiveOrderResult(identifier, ordNo, state, executedQty, avgPrice);
     }
 
     private String newIdentifier() {

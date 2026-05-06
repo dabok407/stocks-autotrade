@@ -218,24 +218,38 @@ public class KisExchangeAdapter implements ExchangeAdapter {
 
     @Override
     public OrderResult placeBuyOrder(String symbol, MarketType marketType, int qty, double price) {
+        return placeBuyOrder(symbol, marketType, qty, price, "00");
+    }
+
+    @Override
+    public OrderResult placeBuyOrder(String symbol, MarketType marketType, int qty, double price, String ordType) {
         Map<String, Object> result;
+        long krxPrice = "01".equals(ordType) ? 0L : (long) price;
         if (marketType == MarketType.KRX) {
-            result = privateClient.placeDomesticOrder(symbol, "BUY", qty, (long) price, "00");
+            result = privateClient.placeDomesticOrder(symbol, "BUY", qty, krxPrice, ordType);
         } else {
             String exchangeCode = resolveOrderExchangeCode(marketType);
-            result = privateClient.placeOverseasOrder(exchangeCode, symbol, "BUY", qty, price, "00");
+            double overseasPrice = "01".equals(ordType) ? 0.0 : price;
+            result = privateClient.placeOverseasOrder(exchangeCode, symbol, "BUY", qty, overseasPrice, ordType);
         }
         return convertOrderResult(symbol, "BUY", qty, price, result);
     }
 
     @Override
     public OrderResult placeSellOrder(String symbol, MarketType marketType, int qty, double price) {
+        return placeSellOrder(symbol, marketType, qty, price, "00");
+    }
+
+    @Override
+    public OrderResult placeSellOrder(String symbol, MarketType marketType, int qty, double price, String ordType) {
         Map<String, Object> result;
+        long krxPrice = "01".equals(ordType) ? 0L : (long) price;
         if (marketType == MarketType.KRX) {
-            result = privateClient.placeDomesticOrder(symbol, "SELL", qty, (long) price, "00");
+            result = privateClient.placeDomesticOrder(symbol, "SELL", qty, krxPrice, ordType);
         } else {
             String exchangeCode = resolveOrderExchangeCode(marketType);
-            result = privateClient.placeOverseasOrder(exchangeCode, symbol, "SELL", qty, price, "00");
+            double overseasPrice = "01".equals(ordType) ? 0.0 : price;
+            result = privateClient.placeOverseasOrder(exchangeCode, symbol, "SELL", qty, overseasPrice, ordType);
         }
         return convertOrderResult(symbol, "SELL", qty, price, result);
     }
@@ -412,10 +426,66 @@ public class KisExchangeAdapter implements ExchangeAdapter {
             if (ordNoObj == null) ordNoObj = output.get("KRX_FWDG_ORD_ORGNO");
             if (ordNoObj != null) ordNo = ordNoObj.toString();
         }
+        if (ordNo == null) {
+            return new OrderResult(null, symbol, side, 0, 0.0,
+                    OrderResult.Status.FAILED, "no order number in KIS response");
+        }
 
-        // 접수 성공 = 체결 가정 (v2에서 체결 조회 API 연동 예정)
-        return new OrderResult(ordNo, symbol, side, qty, price,
-                OrderResult.Status.FILLED, "accepted");
+        // P0-Fix#1 (V41 2026-05-06): 접수 성공(rt_cd=0)이라도 실제 체결 여부는 inquire-daily-ccld 로 검증.
+        // 시세가 빠르게 빠지는 SL 상황에서 지정가 매도가 체결 0주로 끝나는 케이스를 잡는다.
+        // 200ms × 최대 3회 폴링하여 실제 fill 여부를 확인.
+        OrderResult verified = pollFillStatus(ordNo, symbol, side, qty, FILL_POLL_ATTEMPTS, FILL_POLL_DELAY_MS);
+        if (verified != null) {
+            return verified;
+        }
+
+        // 폴링 timeout — 미체결로 보고 호출자가 ORDER_NOT_FILLED 처리하도록 한다.
+        log.warn("[KIS] order accepted but fill unverified: ordNo={}, symbol={}, side={}, qty={}",
+                ordNo, symbol, side, qty);
+        return new OrderResult(ordNo, symbol, side, 0, 0.0,
+                OrderResult.Status.PENDING, "accepted but fill not yet confirmed");
+    }
+
+    // 폴링 파라미터 — package-private 으로 노출하여 테스트에서 단축 가능.
+    static int FILL_POLL_ATTEMPTS = 3;
+    static long FILL_POLL_DELAY_MS = 200L;
+
+    /**
+     * P0-Fix#1: KIS 주문 접수 직후 실제 체결 상태를 폴링.
+     *
+     * @return FILLED (full) / PENDING (partial or none) / CANCELLED / null (모든 시도 실패)
+     */
+    private OrderResult pollFillStatus(String ordNo, String symbol, String side, int requestedQty,
+                                       int maxAttempts, long delayMs) {
+        OrderResult lastSeen = null;
+        for (int i = 0; i < maxAttempts; i++) {
+            try {
+                Thread.sleep(delayMs);
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                break;
+            }
+            OrderResult st = getOrderStatus(ordNo);
+            if (st == null) continue;
+            lastSeen = st;
+            if (st.getStatus() == OrderResult.Status.FILLED && st.getQty() >= requestedQty) {
+                double fillPrice = st.getPrice() > 0 ? st.getPrice() : 0.0;
+                return new OrderResult(ordNo, symbol, side, st.getQty(), fillPrice,
+                        OrderResult.Status.FILLED, "filled");
+            }
+            if (st.getStatus() == OrderResult.Status.CANCELLED) {
+                return new OrderResult(ordNo, symbol, side, 0, 0.0,
+                        OrderResult.Status.CANCELLED, "cancelled");
+            }
+        }
+        if (lastSeen != null) {
+            // 부분 체결이거나 미체결: PENDING. executedQty=0 으로 두어
+            // 호출자(LiveOrderService → KrxMorningRushService)가 isFilled()=false 로 인식.
+            return new OrderResult(ordNo, symbol, side, 0, 0.0,
+                    OrderResult.Status.PENDING,
+                    lastSeen.getMessage() != null ? lastSeen.getMessage() : "not filled within poll timeout");
+        }
+        return null;
     }
 
     private List<StockCandle> getDomesticDayCandles(String symbol, int count) {

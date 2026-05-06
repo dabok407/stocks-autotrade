@@ -176,7 +176,7 @@ public class KrxMorningRushBugFixesIntegrationTest {
         // placeSellOrder는 state="reject"로 반환 → isFilled()=false
         LiveOrderService.LiveOrderResult notFilled = new LiveOrderService.LiveOrderResult(
                 "ID", "ORD", "reject", 0, 0.0);
-        when(liveOrders.placeSellOrder(anyString(), any(MarketType.class), anyInt(), anyDouble()))
+        when(liveOrders.placeSellOrder(anyString(), any(MarketType.class), anyInt(), anyDouble(), anyString()))
                 .thenReturn(notFilled);
 
         PositionEntity pe = buildPosition("005930", 10, 70000.0);
@@ -200,7 +200,7 @@ public class KrxMorningRushBugFixesIntegrationTest {
 
         LiveOrderService.LiveOrderResult filled = new LiveOrderService.LiveOrderResult(
                 "ID", "ORD", "done", 10, 71000.0);
-        when(liveOrders.placeSellOrder(anyString(), any(MarketType.class), anyInt(), anyDouble()))
+        when(liveOrders.placeSellOrder(anyString(), any(MarketType.class), anyInt(), anyDouble(), anyString()))
                 .thenReturn(filled);
 
         // DB 커밋 실패 시뮬레이션
@@ -249,7 +249,7 @@ public class KrxMorningRushBugFixesIntegrationTest {
         boolean sold = invokeExecuteSell(pe, 71000.0, "TEST");
 
         assertFalse(sold);
-        verify(liveOrders, never()).placeSellOrder(anyString(), any(MarketType.class), anyInt(), anyDouble());
+        verify(liveOrders, never()).placeSellOrder(anyString(), any(MarketType.class), anyInt(), anyDouble(), anyString());
         verifyNoInteractions(txTemplate);
     }
 

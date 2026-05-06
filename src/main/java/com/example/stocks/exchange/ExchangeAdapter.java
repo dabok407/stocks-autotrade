@@ -108,6 +108,15 @@ public interface ExchangeAdapter {
     OrderResult placeBuyOrder(String symbol, MarketType marketType, int qty, double price);
 
     /**
+     * 매수 주문 (주문구분 지정 — P0-Fix#2).
+     *
+     * @param ordType "00"=지정가, "01"=시장가
+     */
+    default OrderResult placeBuyOrder(String symbol, MarketType marketType, int qty, double price, String ordType) {
+        return placeBuyOrder(symbol, marketType, qty, price);
+    }
+
+    /**
      * 매도 주문 (지정가).
      *
      * @param symbol     종목 심볼
@@ -117,6 +126,18 @@ public interface ExchangeAdapter {
      * @return 주문 결과
      */
     OrderResult placeSellOrder(String symbol, MarketType marketType, int qty, double price);
+
+    /**
+     * 매도 주문 (주문구분 지정 — P0-Fix#2).
+     *
+     * SL/SL_WIDE/TIME_STOP/SESSION_END 같이 시간이 중요한 청산은 ordType="01"(시장가) 사용.
+     * TP_TRAIL/SPLIT_1ST 같은 익절은 ordType="00"(지정가) 유지.
+     *
+     * @param ordType "00"=지정가, "01"=시장가
+     */
+    default OrderResult placeSellOrder(String symbol, MarketType marketType, int qty, double price, String ordType) {
+        return placeSellOrder(symbol, marketType, qty, price);
+    }
 
     /**
      * 주문 상태 조회.

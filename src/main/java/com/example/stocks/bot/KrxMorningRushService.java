@@ -159,6 +159,20 @@ public class KrxMorningRushService {
 
     // Decision log
     private static final int MAX_DECISION_LOG = 200;
+
+    /**
+     * P0-Fix#2 (V41 2026-05-06): 시간이 중요한 청산 사유 — 시장가 매도(ordType="01") 사용.
+     * 익절 계열(TP_TRAIL, SPLIT_1ST 등)은 지정가 유지하여 슬리피지 회피.
+     */
+    static boolean isMarketOrderReason(String reason) {
+        if (reason == null) return false;
+        String r = reason.toUpperCase();
+        return r.startsWith("SL")             // SL, SL_WIDE, SL_TIGHT
+                || r.startsWith("TIME_STOP")
+                || r.startsWith("SESSION_END")
+                || r.startsWith("SPLIT_SESSION_END")  // 2차 잔량 세션 종료 청산
+                || r.startsWith("FORCE_EXIT");
+    }
     private final Deque<ScannerDecision> decisionLog = new ArrayDeque<ScannerDecision>();
 
     private final com.example.stocks.db.KrxOvertimeRankLogRepository overtimeRankRepo;
@@ -1217,10 +1231,16 @@ public class KrxMorningRushService {
                 return false;
             }
             try {
-                LiveOrderService.LiveOrderResult r = liveOrders.placeSellOrder(pe.getSymbol(), MarketType.KRX, qty, price);
+                // P0-Fix#2 (V41 2026-05-06): 시간이 중요한 청산은 시장가로.
+                // SL/SL_WIDE/SL_TIGHT/TIME_STOP/SESSION_END → "01" (시장가)
+                // TP_TRAIL → "00" (지정가, 익절은 슬리피지 회피)
+                String ordType = isMarketOrderReason(signal.reason) ? "01" : "00";
+                LiveOrderService.LiveOrderResult r = liveOrders.placeSellOrder(
+                        pe.getSymbol(), MarketType.KRX, qty, price, ordType);
                 if (!r.isFilled()) {
                     addDecision(pe.getSymbol(), "SELL", "ERROR", "ORDER_NOT_FILLED",
-                            String.format("Sell not filled state=%s qty=%d", r.state, r.executedQty));
+                            String.format("Sell not filled state=%s qty=%d ordType=%s reason=%s",
+                                    r.state, r.executedQty, ordType, signal.reason));
                     return false;
                 }
                 fillPrice = r.avgPrice > 0 ? r.avgPrice : price;
