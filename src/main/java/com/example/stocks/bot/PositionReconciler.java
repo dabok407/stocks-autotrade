@@ -194,7 +194,14 @@ public class PositionReconciler {
         // config 체크
         KrxMorningRushConfigEntity cfg = loadCfgSafe();
         if (cfg == null || !cfg.isAutoCleanupStuckEnabled()) {
-            log.debug("[Reconciler] auto cleanup stuck DISABLED");
+            log.debug("[Reconciler] auto cleanup stuck DISABLED (master switch)");
+            return;
+        }
+        // V43 (2026-05-06): 화이트리스트 검증 — 비어있으면 매도 안 함
+        Set<String> whitelist = cfg.getStuckCleanupWhitelistSet();
+        if (whitelist.isEmpty()) {
+            log.info("[Reconciler] stuck cleanup whitelist EMPTY — no symbols will be auto-sold. " +
+                    "stuck candidates: {}", report.stuckBotPositions.keySet());
             return;
         }
         // 시장 시간 체크
@@ -216,6 +223,11 @@ public class PositionReconciler {
 
         for (Map.Entry<String, KisAccount> e : report.stuckBotPositions.entrySet()) {
             String sym = e.getKey();
+            // V43: 화이트리스트에 명시된 symbol 만 매도
+            if (!whitelist.contains(sym)) {
+                log.info("[Reconciler] STUCK_CLEANUP SKIP symbol={} — not in whitelist", sym);
+                continue;
+            }
             // 같은 세션 반복 시도 방지
             if (attemptedCleanupSymbols.contains(sym)) {
                 log.debug("[Reconciler] stuck cleanup already attempted this session: {}", sym);

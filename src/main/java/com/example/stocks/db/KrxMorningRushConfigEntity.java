@@ -119,9 +119,20 @@ public class KrxMorningRushConfigEntity {
     @Column(name = "reserve_krw", nullable = false)
     private long reserveKrw = 30000L;
 
-    /** V42 (2026-05-06): 봇이 만든 stuck 포지션 자동 청산 활성화. */
+    /**
+     * V42→V43 (2026-05-06): stuck 포지션 자동 청산 마스터 스위치.
+     * default false (V43 안전 변경) — V42 default true 가 false positive 위험으로 변경됨.
+     */
     @Column(name = "auto_cleanup_stuck_enabled", nullable = false)
-    private boolean autoCleanupStuckEnabled = true;
+    private boolean autoCleanupStuckEnabled = false;
+
+    /**
+     * V43 (2026-05-06): stuck cleanup 대상 symbol 화이트리스트 (CSV).
+     * 사용자가 명시적으로 등록한 symbol 만 자동 매도.
+     * 예: "073540,184230,047040"
+     */
+    @Column(name = "stuck_cleanup_whitelist", length = 500, nullable = false)
+    private String stuckCleanupWhitelist = "";
 
     // ========== Getters & Setters ==========
 
@@ -223,6 +234,21 @@ public class KrxMorningRushConfigEntity {
 
     public boolean isAutoCleanupStuckEnabled() { return autoCleanupStuckEnabled; }
     public void setAutoCleanupStuckEnabled(boolean v) { this.autoCleanupStuckEnabled = v; }
+
+    public String getStuckCleanupWhitelist() { return stuckCleanupWhitelist != null ? stuckCleanupWhitelist : ""; }
+    public void setStuckCleanupWhitelist(String v) { this.stuckCleanupWhitelist = v != null ? v.trim() : ""; }
+
+    /** stuck_cleanup_whitelist CSV 를 Set 으로 파싱. */
+    public Set<String> getStuckCleanupWhitelistSet() {
+        Set<String> set = new HashSet<String>();
+        String csv = getStuckCleanupWhitelist();
+        if (csv.isEmpty()) return set;
+        for (String s : csv.split(",")) {
+            String trimmed = s.trim();
+            if (!trimmed.isEmpty()) set.add(trimmed);
+        }
+        return set;
+    }
 
     /** Excluded symbols as Set (CSV parsed) */
     public Set<String> getExcludeSymbolsSet() {

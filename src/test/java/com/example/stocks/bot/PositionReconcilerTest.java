@@ -53,6 +53,8 @@ class PositionReconcilerTest {
         cfg = new KrxMorningRushConfigEntity();
         cfg.setMode("LIVE");
         cfg.setAutoCleanupStuckEnabled(true);
+        // V43: 테스트용으로 화이트리스트 미리 설정 — 기존 테스트 호환
+        cfg.setStuckCleanupWhitelist("073540,184230,047040,005880");
         when(configRepo.loadOrCreate()).thenReturn(cfg);
         when(liveOrders.isConfigured()).thenReturn(true);
 
@@ -384,5 +386,126 @@ class PositionReconcilerTest {
         reconciler.reconcile();
         assertNotNull(reconciler.getLastReport());
         assertEquals(1, reconciler.getLastReport().brokerCount);
+    }
+
+    // ============================================================
+    // V43: 화이트리스트 안전장치 (false positive 방지)
+    // ============================================================
+
+    @Test
+    @DisplayName("[V43] 화이트리스트 비어있음 → 매도 절대 안 함 (default safety)")
+    void cleanup_emptyWhitelist_neverSells() {
+        cfg.setStuckCleanupWhitelist("");
+
+        PositionReconciler.ReconcileReport report = new PositionReconciler.ReconcileReport();
+        report.stuckBotPositions.put("073540", kisHolding("073540", 10, 6200));
+        report.stuckBotPositions.put("005880", kisHolding("005880", 24, 3057));
+
+        reconciler.attemptStuckCleanup(report);
+
+        verify(liveOrders, never()).placeSellOrder(anyString(), any(MarketType.class),
+                anyInt(), anyDouble(), anyString());
+        assertTrue(report.cleanupSuccess.isEmpty());
+        assertTrue(report.cleanupFailed.isEmpty());
+    }
+
+    @Test
+    @DisplayName("[V43] 005880 false positive 방지: 화이트리스트에 없으면 stuck 후보여도 매도 안 함")
+    void cleanup_falsePositive_005880_protected() {
+        // 005880 대한해운 — trade_log 에 봇 BUY 이력 있지만 사용자 본인 별도 매수분
+        // 화이트리스트에는 진짜 stuck (073540, 184230, 047040) 만 등록
+        cfg.setStuckCleanupWhitelist("073540,184230,047040");
+
+        java.time.LocalTime nowKst = java.time.LocalTime.now(java.time.ZoneId.of("Asia/Seoul"));
+        boolean inMarket = !nowKst.isBefore(PositionReconciler.MARKET_OPEN)
+                && !nowKst.isAfter(PositionReconciler.MARKET_CLOSE);
+
+        PositionReconciler.ReconcileReport report = new PositionReconciler.ReconcileReport();
+        report.stuckBotPositions.put("005880", kisHolding("005880", 24, 3057));  // false positive
+        report.stuckBotPositions.put("073540", kisHolding("073540", 10, 6200));  // 진짜 stuck
+
+        if (inMarket) {
+            when(liveOrders.placeSellOrder(eq("073540"), any(MarketType.class), eq(10),
+                    eq(0.0), eq("01"))).thenReturn(filled(10, 6100));
+        }
+
+        reconciler.attemptStuckCleanup(report);
+
+        // 005880 은 화이트리스트에 없으므로 매도 시도조차 안 됨
+        verify(liveOrders, never()).placeSellOrder(eq("005880"), any(MarketType.class),
+                anyInt(), anyDouble(), anyString());
+        assertFalse(report.cleanupSuccess.contains("005880"));
+        assertFalse(report.cleanupFailed.contains("005880"));
+    }
+
+    @Test
+    @DisplayName("[V43] 화이트리스트에 명시된 symbol 만 매도 시도")
+    void cleanup_onlyWhitelistedSymbols_sold() {
+        java.time.LocalTime nowKst = java.time.LocalTime.now(java.time.ZoneId.of("Asia/Seoul"));
+        boolean inMarket = !nowKst.isBefore(PositionReconciler.MARKET_OPEN)
+                && !nowKst.isAfter(PositionReconciler.MARKET_CLOSE);
+        if (!inMarket) return;  // 시장 외 시간 skip
+
+        cfg.setStuckCleanupWhitelist("073540");  // 1개만 등록
+
+        when(liveOrders.placeSellOrder(eq("073540"), any(MarketType.class), eq(10),
+                eq(0.0), eq("01"))).thenReturn(filled(10, 6100));
+
+        PositionReconciler.ReconcileReport report = new PositionReconciler.ReconcileReport();
+        report.stuckBotPositions.put("073540", kisHolding("073540", 10, 6200));
+        report.stuckBotPositions.put("184230", kisHolding("184230", 46, 1074));
+
+        reconciler.attemptStuckCleanup(report);
+
+        // 073540 매도 시도, 184230 은 안 함
+        verify(liveOrders, times(1)).placeSellOrder(eq("073540"), any(MarketType.class),
+                eq(10), eq(0.0), eq("01"));
+        verify(liveOrders, never()).placeSellOrder(eq("184230"), any(MarketType.class),
+                anyInt(), anyDouble(), anyString());
+    }
+
+    @Test
+    @DisplayName("[V43] auto_cleanup_stuck_enabled=false (default V43) → 화이트리스트 있어도 매도 안 함")
+    void cleanup_disabledMaster_neverSells_evenWithWhitelist() {
+        cfg.setAutoCleanupStuckEnabled(false);
+        cfg.setStuckCleanupWhitelist("073540,184230,047040");
+
+        PositionReconciler.ReconcileReport report = new PositionReconciler.ReconcileReport();
+        report.stuckBotPositions.put("073540", kisHolding("073540", 10, 6200));
+
+        reconciler.attemptStuckCleanup(report);
+
+        verify(liveOrders, never()).placeSellOrder(anyString(), any(MarketType.class),
+                anyInt(), anyDouble(), anyString());
+    }
+
+    @Test
+    @DisplayName("[V43] Entity getStuckCleanupWhitelistSet() — CSV 파싱 + 공백/빈문자 제거")
+    void entity_whitelistCsvParsing() {
+        KrxMorningRushConfigEntity c = new KrxMorningRushConfigEntity();
+        c.setStuckCleanupWhitelist("");
+        assertTrue(c.getStuckCleanupWhitelistSet().isEmpty());
+
+        c.setStuckCleanupWhitelist("073540, 184230 , 047040");
+        java.util.Set<String> set = c.getStuckCleanupWhitelistSet();
+        assertEquals(3, set.size());
+        assertTrue(set.contains("073540"));
+        assertTrue(set.contains("184230"));
+        assertTrue(set.contains("047040"));
+
+        c.setStuckCleanupWhitelist("073540,,184230,");  // 빈 항목 제거
+        assertEquals(2, c.getStuckCleanupWhitelistSet().size());
+
+        c.setStuckCleanupWhitelist(null);
+        assertTrue(c.getStuckCleanupWhitelistSet().isEmpty());
+    }
+
+    @Test
+    @DisplayName("[V43] Entity default: autoCleanupStuckEnabled=false (안전 default)")
+    void entity_v43DefaultsAreSafe() {
+        KrxMorningRushConfigEntity c = new KrxMorningRushConfigEntity();
+        assertFalse(c.isAutoCleanupStuckEnabled(), "default OFF — V43 안전 변경");
+        assertEquals("", c.getStuckCleanupWhitelist());
+        assertTrue(c.getStuckCleanupWhitelistSet().isEmpty());
     }
 }
