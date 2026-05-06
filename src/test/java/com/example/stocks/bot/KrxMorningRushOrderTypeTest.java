@@ -3,6 +3,7 @@ package com.example.stocks.bot;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -72,5 +73,57 @@ class KrxMorningRushOrderTypeTest {
         assertTrue(KrxMorningRushService.isMarketOrderReason("sl hit: ..."));
         assertTrue(KrxMorningRushService.isMarketOrderReason("Time_Stop: ..."));
         assertFalse(KrxMorningRushService.isMarketOrderReason("tp_trail ..."));
+    }
+
+    // ===========================================================
+    // P0-Fix#4: 후반 세션(09:50+) escalate to market 검증
+    // ===========================================================
+
+    @Test
+    @DisplayName("[Fix#4] 09:50 이전: TP_TRAIL 은 지정가 유지")
+    void earlySession_tpTrail_usesLimit() {
+        java.time.LocalTime t = java.time.LocalTime.of(9, 30);
+        assertEquals("00", KrxMorningRushService.resolveOrdType(
+                "TP_TRAIL avg=1679 peak=1736 now=1703 drop=1.90% pnl=1.43%", t));
+        assertEquals("00", KrxMorningRushService.resolveOrdType(
+                "SPLIT_1ST pnl=+2.32% >= 1.60% avg=15950 now=16320", t));
+    }
+
+    @Test
+    @DisplayName("[Fix#4] 09:50 이전이라도 SL 은 항상 시장가")
+    void earlySession_sl_usesMarket() {
+        java.time.LocalTime t = java.time.LocalTime.of(9, 0);
+        assertEquals("01", KrxMorningRushService.resolveOrdType(
+                "SL_WIDE pnl=-2.49% <= -2.40%", t));
+        assertEquals("01", KrxMorningRushService.resolveOrdType(
+                "SL hit: pnl=-1.29% <= sl=-1.00%", t));
+    }
+
+    @Test
+    @DisplayName("[Fix#4] 09:50 이후: TP_TRAIL 도 시장가로 escalate")
+    void lateSession_tpTrail_escalatesToMarket() {
+        java.time.LocalTime t = java.time.LocalTime.of(9, 50);
+        assertEquals("01", KrxMorningRushService.resolveOrdType(
+                "TP_TRAIL avg=1679 peak=1736 now=1703 drop=1.90%", t));
+        assertEquals("01", KrxMorningRushService.resolveOrdType(
+                "SPLIT_1ST pnl=+2.32% avg=15950 now=16320", t));
+    }
+
+    @Test
+    @DisplayName("[Fix#4] 09:50 정확히 = late session (boundary 포함)")
+    void boundary_950_isLate() {
+        assertTrue(KrxMorningRushService.isLateSession(java.time.LocalTime.of(9, 50)));
+        assertTrue(KrxMorningRushService.isLateSession(java.time.LocalTime.of(9, 51)));
+        assertFalse(KrxMorningRushService.isLateSession(java.time.LocalTime.of(9, 49, 59)));
+    }
+
+    @Test
+    @DisplayName("[Fix#4] null time = 안전 처리 (early session)")
+    void nullTime_treatAsEarly() {
+        assertFalse(KrxMorningRushService.isLateSession(null));
+        // SL 은 시장가 — 시간 무관
+        assertEquals("01", KrxMorningRushService.resolveOrdType("SL_WIDE", null));
+        // TP 는 시간 모르면 안전하게 지정가
+        assertEquals("00", KrxMorningRushService.resolveOrdType("TP_TRAIL", null));
     }
 }

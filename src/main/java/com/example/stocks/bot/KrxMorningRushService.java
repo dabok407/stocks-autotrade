@@ -173,6 +173,28 @@ public class KrxMorningRushService {
                 || r.startsWith("SPLIT_SESSION_END")  // 2차 잔량 세션 종료 청산
                 || r.startsWith("FORCE_EXIT");
     }
+
+    /**
+     * P0-Fix#4 (V41 2026-05-06): 후반 세션(09:50+)에는 모든 청산을 시장가로 escalate.
+     * 사유: 마감 임박 시 지정가 미체결로 다음 날까지 들고 가는 위험을 막는다.
+     * TP_TRAIL 같은 익절도 시간이 부족하면 시장가로 안전 청산.
+     */
+    static final java.time.LocalTime LATE_SESSION_THRESHOLD = java.time.LocalTime.of(9, 50);
+
+    static boolean isLateSession(java.time.LocalTime nowKst) {
+        return nowKst != null && !nowKst.isBefore(LATE_SESSION_THRESHOLD);
+    }
+
+    /**
+     * 청산 사유 + 현재 시각 기준으로 ordType 결정.
+     * - 시간 critical 사유(SL/TIME_STOP/SESSION_END/FORCE_EXIT): 항상 시장가
+     * - 익절(TP_TRAIL/SPLIT_1ST): 09:50 이전 = 지정가, 09:50 이후 = 시장가 escalate
+     */
+    static String resolveOrdType(String reason, java.time.LocalTime nowKst) {
+        if (isMarketOrderReason(reason)) return "01";
+        if (isLateSession(nowKst)) return "01";
+        return "00";
+    }
     private final Deque<ScannerDecision> decisionLog = new ArrayDeque<ScannerDecision>();
 
     private final com.example.stocks.db.KrxOvertimeRankLogRepository overtimeRankRepo;
@@ -1231,10 +1253,10 @@ public class KrxMorningRushService {
                 return false;
             }
             try {
-                // P0-Fix#2 (V41 2026-05-06): 시간이 중요한 청산은 시장가로.
-                // SL/SL_WIDE/SL_TIGHT/TIME_STOP/SESSION_END → "01" (시장가)
-                // TP_TRAIL → "00" (지정가, 익절은 슬리피지 회피)
-                String ordType = isMarketOrderReason(signal.reason) ? "01" : "00";
+                // P0-Fix#2+#4 (V41 2026-05-06): 시간 critical 청산 = 시장가, 후반 세션(09:50+) = 시장가 escalate.
+                // SL/SL_WIDE/SL_TIGHT/TIME_STOP/SESSION_END → 항상 "01" (시장가)
+                // TP_TRAIL/SPLIT_1ST → 09:50 이전 = "00" (지정가), 이후 = "01" (시장가 escalate)
+                String ordType = resolveOrdType(signal.reason, java.time.LocalTime.now(KST));
                 LiveOrderService.LiveOrderResult r = liveOrders.placeSellOrder(
                         pe.getSymbol(), MarketType.KRX, qty, price, ordType);
                 if (!r.isFilled()) {
