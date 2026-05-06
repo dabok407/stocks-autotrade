@@ -151,6 +151,16 @@ public class KrxMorningRushService {
     // 가격이 RETRY_PRICE_DRIFT_MAX 이상 올라갔으면 포기 (펌프 따라가기 방지).
     // 성공 매수 시 remove, IDLE 전환 시 clear.
     private final ConcurrentHashMap<String, Double> firstBuyAttemptPrice = new ConcurrentHashMap<String, Double>();
+
+    // P3-B (V41 2026-05-06): 1분 chase guard — 종목별 09:00:00~09:00:59 최고가 추적.
+    // 09:01 이후 진입가가 first1MinHigh * 1.005 초과면 SKIP (이미 다 오른 종목 추격 방지).
+    private final ConcurrentHashMap<String, Double> first1MinHigh = new ConcurrentHashMap<String, Double>();
+
+    // P3-A (V41 2026-05-06): KOSPI200 선물 방향 캐시 (한 세션당 1회 조회)
+    private volatile MarketRegime currentRegime = MarketRegime.UNKNOWN;
+    private volatile long lastRegimeCheckEpochMs = 0L;
+
+    enum MarketRegime { UNKNOWN, RISK_ON, CAUTIOUS, RISK_OFF }
     static final double RETRY_PRICE_DRIFT_MAX = 0.02; // 2%
 
     // Alive heartbeat (every 60s) — proves mainLoop is still ticking,
@@ -742,6 +752,17 @@ public class KrxMorningRushService {
             return;
         }
 
+        // P3-A (V41 2026-05-06): KOSPI200 시장 regime veto.
+        // KODEX 200 (069500) 을 KOSPI200 프록시로 사용 — 전일 대비 변동률 체크.
+        // < -0.7% → 그날 매수 전면 차단 (REGIME_RISK_OFF)
+        // < -0.3% → CAUTIOUS 모드 (gap 임계 5%, confirms 5 강화 — 후속 단계 적용 예정)
+        MarketRegime regime = updateMarketRegime();
+        if (regime == MarketRegime.RISK_OFF) {
+            addDecision("*", "BUY", "BLOCKED", "REGIME_RISK_OFF",
+                    "KOSPI200 proxy 하락 -0.7% 이상 — 그날 매수 전면 차단");
+            return;
+        }
+
         // P2-B (V41 2026-05-06): Daily Loss Circuit Breaker
         // 당일 실현 PnL 합계 / capital 이 dailyLossLimitPct (예: -2.0%) 이하면 추가 매수 차단.
         BigDecimal dailyLimitPct = cfg.getDailyLossLimitPct();
@@ -847,6 +868,17 @@ public class KrxMorningRushService {
             if (StockSafetyGuard.isNearViLimit(currentPrice, prevClose)) {
                 addDecision(symbol, "BUY", "BLOCKED", "VI_LIMIT",
                         String.format("Near VI limit: price=%.0f prevClose=%.0f", currentPrice, prevClose));
+                continue;
+            }
+
+            // P3-B (V41 2026-05-06): 1분 chase guard
+            // 09:00 분봉 high + 0.5% 보다 높은 가격에서 진입 시 SKIP — 이미 다 오른 종목 추격 방지.
+            // 0183V0 (5/6) 사례: 09:00 high 대비 1% 이상 높은 가격에 매수 → 즉시 0% TIME_STOP
+            if (!checkChaseGuard(symbol, currentPrice, java.time.LocalTime.now(KST))) {
+                Double firstHigh = first1MinHigh.get(symbol);
+                addDecision(symbol, "BUY", "SKIPPED", "CHASE_GUARD",
+                        String.format("price=%.0f > 09:00 high %.0f × 1.005 — 추격 차단",
+                                currentPrice, firstHigh));
                 continue;
             }
 
@@ -1499,6 +1531,97 @@ public class KrxMorningRushService {
             }
         }
         return sum;
+    }
+
+    // ============================================================
+    // P3-A (V41 2026-05-06): KOSPI 시장 regime 판단
+    // ============================================================
+
+    /** KOSPI200 프록시 (KODEX 200 ETF). */
+    static final String KOSPI_REGIME_PROXY = "069500";
+
+    /** regime 판단 임계 (전일 대비 %): risk-off=-0.7, cautious=-0.3 */
+    static final double REGIME_RISK_OFF_PCT = -0.7;
+    static final double REGIME_CAUTIOUS_PCT = -0.3;
+
+    /** regime 캐시 TTL (5분) — 자주 바뀌지 않으니 짧게 갱신. */
+    static final long REGIME_CACHE_TTL_MS = 5 * 60 * 1000L;
+
+    /**
+     * KOSPI200 프록시 (KODEX 200) 의 전일 대비 변동률을 조회하여 regime 판정.
+     * 5분 캐시.
+     *
+     * @return RISK_OFF / CAUTIOUS / RISK_ON / UNKNOWN
+     */
+    MarketRegime updateMarketRegime() {
+        long now = System.currentTimeMillis();
+        if (currentRegime != MarketRegime.UNKNOWN
+                && now - lastRegimeCheckEpochMs < REGIME_CACHE_TTL_MS) {
+            return currentRegime;
+        }
+        try {
+            Map<String, Object> data = kisPublic.getDomesticCurrentPrice(KOSPI_REGIME_PROXY);
+            if (data == null || data.isEmpty()) {
+                return currentRegime; // 조회 실패 시 기존 regime 유지
+            }
+            double prdyCtrtPct = parseDoubleSafe(data.get("prdy_ctrt"));  // 전일대비등락률(%)
+            MarketRegime newRegime;
+            if (prdyCtrtPct <= REGIME_RISK_OFF_PCT) newRegime = MarketRegime.RISK_OFF;
+            else if (prdyCtrtPct <= REGIME_CAUTIOUS_PCT) newRegime = MarketRegime.CAUTIOUS;
+            else newRegime = MarketRegime.RISK_ON;
+
+            if (newRegime != currentRegime) {
+                log.info("[KrxMorningRush] Market regime change: {} → {} (KODEX200 prdy_ctrt={}%)",
+                        currentRegime, newRegime, prdyCtrtPct);
+            }
+            currentRegime = newRegime;
+            lastRegimeCheckEpochMs = now;
+            return newRegime;
+        } catch (Exception e) {
+            log.warn("[KrxMorningRush] regime check failed: {}", e.getMessage());
+            return currentRegime;
+        }
+    }
+
+    private double parseDoubleSafe(Object val) {
+        if (val == null) return 0.0;
+        try { return Double.parseDouble(val.toString().trim()); }
+        catch (NumberFormatException e) { return 0.0; }
+    }
+
+    // ============================================================
+    // P3-B (V41 2026-05-06): 1분 chase guard
+    // ============================================================
+
+    /** 09:00 분봉 max 가격 대비 추격 허용 한도 (0.5%). */
+    static final double CHASE_GUARD_HEADROOM = 0.005;
+
+    /**
+     * 09:00:00 ~ 09:00:59 사이 호출 시 first1MinHigh 갱신.
+     * 09:01:00 이후 호출 시 currentPrice > first1MinHigh × 1.005 면 false 반환 (chase 차단).
+     *
+     * @return true = 진입 OK, false = chase guard 발동
+     */
+    boolean checkChaseGuard(String symbol, double currentPrice, java.time.LocalTime nowKst) {
+        if (nowKst == null) return true;
+        // 09:00:00 ~ 09:00:59 = 첫 분봉 추적 구간
+        if (nowKst.getHour() == 9 && nowKst.getMinute() == 0) {
+            Double prev = first1MinHigh.get(symbol);
+            if (prev == null || currentPrice > prev) {
+                first1MinHigh.put(symbol, currentPrice);
+            }
+            return true;  // 09:00 분봉 중 — 진입 허용 (high 만 추적)
+        }
+        // 09:01 이후 — chase guard 검사
+        if (nowKst.isBefore(java.time.LocalTime.of(9, 1))) {
+            return true;  // 09:00 이전 — 가드 비활성
+        }
+        Double firstHigh = first1MinHigh.get(symbol);
+        if (firstHigh == null || firstHigh <= 0) {
+            return true;  // 데이터 없음 — 통과 (보수적)
+        }
+        double allowed = firstHigh * (1 + CHASE_GUARD_HEADROOM);
+        return currentPrice <= allowed;
     }
 
     /**
