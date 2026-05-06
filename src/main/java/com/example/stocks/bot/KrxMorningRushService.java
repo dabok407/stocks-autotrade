@@ -742,6 +742,24 @@ public class KrxMorningRushService {
             return;
         }
 
+        // P2-B (V41 2026-05-06): Daily Loss Circuit Breaker
+        // 당일 실현 PnL 합계 / capital 이 dailyLossLimitPct (예: -2.0%) 이하면 추가 매수 차단.
+        BigDecimal dailyLimitPct = cfg.getDailyLossLimitPct();
+        if (dailyLimitPct != null && dailyLimitPct.signum() < 0) {
+            BigDecimal capital = getGlobalCapital();
+            double capitalKrw = capital != null ? capital.doubleValue() : 0;
+            double todayPnl = getTodayRealizedPnlKrw();
+            if (capitalKrw > 0) {
+                double todayPnlPct = (todayPnl / capitalKrw) * 100.0;
+                if (todayPnlPct <= dailyLimitPct.doubleValue()) {
+                    addDecision("*", "BUY", "BLOCKED", "DAILY_LOSS_HALT",
+                            String.format("today PnL %.0f KRW (%.2f%%) <= limit %.2f%% — 추가 매수 차단",
+                                    todayPnl, todayPnlPct, dailyLimitPct.doubleValue()));
+                    return;
+                }
+            }
+        }
+
         int rushPosCount = 0;
         List<PositionEntity> allPos = positionRepo.findAll();
         Set<String> ownedSymbols = new HashSet<String>();
@@ -763,15 +781,17 @@ public class KrxMorningRushService {
         BigDecimal orderAmount = calcOrderSize(cfg);
         BigDecimal globalCap = getGlobalCapital();
         double totalInvested = calcTotalInvestedAllPositions();
-        double remainingBudget = Math.max(0, globalCap.doubleValue() - totalInvested);
+        // P2-C (V41 2026-05-06): reserve_krw 만큼 항상 남겨둠 (비상 매도 수수료 버퍼).
+        long reserveKrw = cfg.getReserveKrw();
+        double remainingBudget = Math.max(0, globalCap.doubleValue() - totalInvested - reserveKrw);
 
         if (orderAmount.doubleValue() > remainingBudget) {
             if (remainingBudget >= 50000) {
                 orderAmount = BigDecimal.valueOf(remainingBudget).setScale(0, RoundingMode.DOWN);
             } else {
                 addDecision("*", "BUY", "BLOCKED", "CAPITAL_LIMIT",
-                        String.format("Global capital limit exceeded: invested %.0f / limit %s",
-                                totalInvested, globalCap.toPlainString()));
+                        String.format("Global capital limit exceeded: invested %.0f / limit %s / reserve %d",
+                                totalInvested, globalCap.toPlainString(), reserveKrw));
                 return;
             }
         }
@@ -1479,6 +1499,32 @@ public class KrxMorningRushService {
             }
         }
         return sum;
+    }
+
+    /**
+     * P2-B (V41 2026-05-06): 당일(KST 자정 기준) 실현 PnL 합계 (KRX_MORNING_RUSH SELL only).
+     * Daily Loss Circuit Breaker 의 입력값.
+     */
+    double getTodayRealizedPnlKrw() {
+        java.time.ZonedDateTime nowKst = java.time.ZonedDateTime.now(KST);
+        java.time.ZonedDateTime midnightKst = nowKst.toLocalDate().atStartOfDay(KST);
+        long startMs = midnightKst.toInstant().toEpochMilli();
+        long endMs = nowKst.toInstant().toEpochMilli();
+
+        double sumKrw = 0.0;
+        try {
+            List<TradeEntity> todays = tradeLogRepo.findByTsEpochMsBetween(startMs, endMs);
+            for (TradeEntity t : todays) {
+                if (!"SELL".equalsIgnoreCase(t.getAction())) continue;
+                if (!ENTRY_STRATEGY.equals(t.getPatternType())) continue;
+                if (t.getPnlKrw() != null) {
+                    sumKrw += t.getPnlKrw().doubleValue();
+                }
+            }
+        } catch (Exception e) {
+            log.warn("[KrxMorningRush] getTodayRealizedPnlKrw failed: {}", e.getMessage());
+        }
+        return sumKrw;
     }
 
     // ========== WebSocket 실시간 TP_TRAIL + 티어드 SL + Split-Exit (V34) ==========

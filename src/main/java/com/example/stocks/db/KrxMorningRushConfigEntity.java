@@ -110,6 +110,15 @@ public class KrxMorningRushConfigEntity {
     @Column(name = "trail_drop_after_split", nullable = false, precision = 5, scale = 2)
     private BigDecimal trailDropAfterSplit = BigDecimal.valueOf(1.5);
 
+    // ── V41 (2026-05-06): P2 리스크 가드 ──
+    /** 당일 실현 PnL 합계가 capital의 이 % 이하면 추가 매수 차단. 음수 (예: -2.0). */
+    @Column(name = "daily_loss_limit_pct", nullable = false, precision = 5, scale = 2)
+    private BigDecimal dailyLossLimitPct = BigDecimal.valueOf(-2.0);
+
+    /** 비상 매도 수수료 버퍼 — 가용 예수금에서 이 금액 빼고 매수. */
+    @Column(name = "reserve_krw", nullable = false)
+    private long reserveKrw = 30000L;
+
     // ========== Getters & Setters ==========
 
     public int getId() { return id; }
@@ -200,6 +209,13 @@ public class KrxMorningRushConfigEntity {
 
     public BigDecimal getTrailDropAfterSplit() { return trailDropAfterSplit; }
     public void setTrailDropAfterSplit(BigDecimal v) { this.trailDropAfterSplit = v != null ? v : BigDecimal.valueOf(1.5); }
+
+    // V41 (2026-05-06): P2 리스크 가드
+    public BigDecimal getDailyLossLimitPct() { return dailyLossLimitPct; }
+    public void setDailyLossLimitPct(BigDecimal v) { this.dailyLossLimitPct = v != null ? v : BigDecimal.valueOf(-2.0); }
+
+    public long getReserveKrw() { return reserveKrw; }
+    public void setReserveKrw(long v) { this.reserveKrw = Math.max(0, v); }
 
     /** Excluded symbols as Set (CSV parsed) */
     public Set<String> getExcludeSymbolsSet() {
