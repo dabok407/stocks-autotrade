@@ -98,6 +98,8 @@ public class KrxMorningRushService {
     private volatile KisWebSocketClient.PriceListener wsListener;
     // V34: race condition 방어 (WS + REST 동시 매도 방지)
     private final Set<String> sellingSymbols = ConcurrentHashMap.newKeySet();
+    // V41 (2026-05-14): WS 끊김 경고 로그 throttle (1분당 1회)
+    private volatile long lastWsDownWarnMs = 0L;
 
     // V39 (2026-04-18) B1: SPLIT_1ST 반복 재시도 폭주 방지.
     // 운영 사고: 010170 (4/17 09:01~09:05) — placeSellOrder 미체결이 반복되면서
@@ -237,6 +239,24 @@ public class KrxMorningRushService {
         this.sharedThrottle = sharedThrottle;
     }
 
+    /**
+     * V41 (2026-05-14): 시작 시각 기반 phase 추정.
+     * 휴장/주말 체크는 mainLoop가 처리하므로 여기선 시간만 본다.
+     */
+    private Phase inferPhaseFromTime() {
+        ZonedDateTime now = ZonedDateTime.now(KST);
+        int min = now.getHour() * 60 + now.getMinute();
+        KrxMorningRushConfigEntity cfg;
+        try { cfg = configRepo.loadOrCreate(); } catch (Exception e) { return Phase.IDLE; }
+        int sessionEndMin = cfg.getSessionEndHour() * 60 + cfg.getSessionEndMin();
+
+        if (min < 8 * 60 + 50) return Phase.IDLE;
+        if (min < 9 * 60) return Phase.IDLE; // COLLECTING_RANGE 는 mainLoop 가 진입
+        if (min < 9 * 60 + 10) return Phase.RANGE_COLLECTED;
+        if (min < sessionEndMin) return Phase.MONITORING;
+        return Phase.SESSION_END;
+    }
+
     // ========== Restore on restart (2026-04-17 #2) ==========
 
     /**
@@ -307,7 +327,16 @@ public class KrxMorningRushService {
         }
         log.info("[KrxMorningRush] starting...");
         statusText = "RUNNING";
-        currentPhase = Phase.IDLE;
+        // V41 (2026-05-14): 장중 재시작 시 phase 자동 복원.
+        // 운영 사고: 5/14 09:47 V41 재배포 → currentPhase=IDLE 초기화 →
+        //   IDLE state machine 은 08:50~09:00 사이에만 COLLECTING_RANGE 로 전환 →
+        //   09:00 이후 재시작 시 영원히 "IDLE (outside hours)" 갇힘 →
+        //   monitorPositions / forceExitAll 호출 안 됨 → 222420(+2.84%) 매도 실패.
+        // 변경: 시작 시 KST 시각 기반으로 phase 추정해서 복원.
+        currentPhase = inferPhaseFromTime();
+        if (currentPhase != Phase.IDLE) {
+            log.info("[KrxMorningRush] restart: phase restored to {} (intra-session restart detected)", currentPhase);
+        }
         confirmCounts.clear();
         confirmPriceHistory.clear();
         prevCloseMap.clear();
@@ -350,6 +379,35 @@ public class KrxMorningRushService {
             }
         };
         kisWs.addPriceListener(wsListener);
+
+        // V41 (2026-05-14): 재시작 시 보유 포지션 WS 자동 재구독.
+        // 운영 사고: 5/14 09:47 V41 재배포 후 222420(쎄노텍, 보유중) WS 재구독 누락 →
+        //            checkRealtimeTpSl 콜백 안 옴 → realtime SL/TP 죽음.
+        //            기존 코드는 executeBuy 직후에만 subscribe 호출 → 재시작 시 누락.
+        try {
+            List<PositionEntity> liveMrPos = positionRepo.findAll();
+            int resubs = 0;
+            for (PositionEntity p : liveMrPos) {
+                if (ENTRY_STRATEGY.equals(p.getEntryStrategy()) && p.getQty() > 0) {
+                    kisWs.subscribe(p.getSymbol(), false);
+                    // positionCache 도 함께 복원 (재시작 후 비어있음)
+                    double avg = p.getAvgPrice() != null ? p.getAvgPrice().doubleValue() : 0;
+                    if (avg > 0 && !positionCache.containsKey(p.getSymbol())) {
+                        long openedAt = p.getOpenedAt() != null
+                                ? p.getOpenedAt().toEpochMilli() : System.currentTimeMillis();
+                        positionCache.put(p.getSymbol(),
+                                new double[]{avg, avg, 0, openedAt, p.getSplitPhase()});
+                    }
+                    resubs++;
+                }
+            }
+            if (resubs > 0) {
+                log.info("[KrxMorningRush] restart resubscribe: {} positions resubscribed to WS + positionCache restored",
+                        resubs);
+            }
+        } catch (Exception e) {
+            log.warn("[KrxMorningRush] restart resubscribe failed: {}", e.getMessage());
+        }
 
         return true;
     }
@@ -1032,8 +1090,25 @@ public class KrxMorningRushService {
     /**
      * V40 (2026-04-20): REST 폴링 — peak 업데이트 + POS_STATUS 로그 + TIME_STOP 만 담당.
      * SL/TP 판정은 WebSocket realtime(checkRealtimeTpSl) 단독 책임.
+     *
+     * V41 (2026-05-14): WS 끊김 시 SL/TP 안전망(failover) 추가.
+     * 운영 사고: 5/14 06:34 WS 끊김 → 재연결 실패로 영구 정지 → SL/TP 사망 상태로
+     *            09:00 거래 진입 → 003070 -3.84%까지 SL 미작동, TIME_STOP 30분에 -4.30% 손절.
+     * 변경: kisWs.isConnected()==false 일 때만 REST 가 SL/TP 도 함께 판정.
+     *       WS 정상 시엔 V40 동작 그대로 유지 (V자 반등 보존).
      */
     private void monitorPositions(KrxMorningRushConfigEntity cfg) {
+        // V41: WS 연결 상태 — false면 SL/TP 백업 활성화
+        final boolean wsDown = !kisWs.isConnected();
+        if (wsDown) {
+            // 1분에 한 번만 경고 (스팸 방지)
+            long now = System.currentTimeMillis();
+            if (now - lastWsDownWarnMs > 60_000L) {
+                log.warn("[KrxMorningRush] WS DOWN — REST SL/TP failover ACTIVE (sl={}%, wideSl={}%, grace={}s)",
+                        cfg.getSlPct(), cfg.getWideSlPct(), cfg.getGracePeriodSec());
+                lastWsDownWarnMs = now;
+            }
+        }
         List<PositionEntity> allPos = positionRepo.findAll();
         int timeStopMin = cfg.getTimeStopMin();
 
@@ -1077,8 +1152,74 @@ public class KrxMorningRushService {
             }
 
             addDecision(symbol, "MONITOR", "CHECK", "POS_STATUS",
-                    String.format(Locale.ROOT, "price=%.0f avg=%.0f pnl=%.2f%% elapsed=%dmin split=%d trail=%s",
-                            currentPrice, avgPrice, pnlPct, elapsedMinTotal, splitPhase, trailActivated));
+                    String.format(Locale.ROOT, "price=%.0f avg=%.0f pnl=%.2f%% elapsed=%dmin split=%d trail=%s wsDown=%s",
+                            currentPrice, avgPrice, pnlPct, elapsedMinTotal, splitPhase, trailActivated, wsDown));
+
+            // ━━━ V41 (2026-05-14): WS 끊김 시 SL/TP 백업 ━━━
+            // WS 정상이면 V40 동작 (TIME_STOP 만) — V자 반등 보존.
+            // WS 죽었을 때만 활성화 — race condition 시간차 우려 없이 안전망 역할.
+            if (wsDown) {
+                String wsSellType = null;
+                String wsSellReason = null;
+                // TP_TRAIL 활성화 체크 (REST 백업)
+                if (!trailActivated && pnlPct >= cachedTpTrailActivatePct) {
+                    if (cached != null) cached[2] = 1.0;
+                    trailActivated = true;
+                    log.info("[KrxMorningRush] TP_TRAIL activated (REST backup, WS down): {} pnl=+{} peak={}",
+                            symbol, String.format(Locale.ROOT, "%.2f%%", pnlPct), peakPrice);
+                }
+                if (trailActivated) {
+                    double dropFromPeak = (peakPrice - currentPrice) / peakPrice * 100.0;
+                    if (dropFromPeak >= cachedTpTrailDropPct) {
+                        wsSellType = "TP_TRAIL";
+                        wsSellReason = String.format(Locale.ROOT,
+                                "TP_TRAIL avg=%.0f peak=%.0f now=%.0f drop=%.2f%% pnl=%.2f%% (REST failover)",
+                                avgPrice, peakPrice, currentPrice, dropFromPeak, pnlPct);
+                    }
+                }
+                if (wsSellType == null) {
+                    if (elapsedMs < cachedGracePeriodMs) {
+                        if (pnlPct <= -10.0) {
+                            wsSellType = "SL_EMERGENCY";
+                            wsSellReason = String.format(Locale.ROOT,
+                                    "SL_EMERGENCY pnl=%.2f%% (grace, REST failover)", pnlPct);
+                        }
+                    } else if (elapsedMs < cachedWidePeriodMs) {
+                        if (pnlPct <= -cachedWideSlPct) {
+                            wsSellType = "SL_WIDE";
+                            wsSellReason = String.format(Locale.ROOT,
+                                    "SL_WIDE pnl=%.2f%% <= -%.2f%% (REST failover)", pnlPct, cachedWideSlPct);
+                        }
+                    } else {
+                        if (pnlPct <= -cachedSlPct) {
+                            wsSellType = "SL_TIGHT";
+                            wsSellReason = String.format(Locale.ROOT,
+                                    "SL_TIGHT pnl=%.2f%% <= -%.2f%% (REST failover)", pnlPct, cachedSlPct);
+                        }
+                    }
+                }
+                if (wsSellType != null) {
+                    if (!sellingSymbols.add(symbol)) continue;
+                    log.info("[KrxMorningRush] REST failover {} triggered | {} | {}", wsSellType, symbol, wsSellReason);
+                    try {
+                        PositionEntity fresh = positionRepo.findById(symbol).orElse(null);
+                        if (fresh == null || fresh.getQty() <= 0) continue;
+                        boolean sold = executeSell(fresh, currentPrice,
+                                Signal.of(SignalAction.SELL, null, wsSellReason), cfg);
+                        if (sold) {
+                            positionCache.remove(symbol);
+                            addDecision(symbol, "SELL", "EXECUTED", wsSellType, wsSellReason);
+                        }
+                    } catch (Exception e) {
+                        log.error("[KrxMorningRush] REST failover sell failed for {}", symbol, e);
+                        addDecision(symbol, "SELL", "ERROR", "SELL_FAIL",
+                                "REST failover 매도 실행 오류: " + e.getMessage());
+                    } finally {
+                        sellingSymbols.remove(symbol);
+                    }
+                    continue;
+                }
+            }
 
             // V40 (2026-04-20): REST 경로는 TIME_STOP 만 담당.
             // SL/TP 는 WebSocket realtime(checkRealtimeTpSl) 단독 책임.

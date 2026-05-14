@@ -43,8 +43,15 @@ public class KisWebSocketClient {
     private static final String WS_URL_LIVE = "ws://ops.koreainvestment.com:21000/tryitout";
     private static final String WS_URL_PAPER = "ws://ops.koreainvestment.com:31000/tryitout";
 
-    private static final int MAX_RECONNECT_ATTEMPTS = 5;
+    // V41 (2026-05-14): 재연결 최대횟수 5 → 60 확대.
+    // 운영 사고: 5/14 06:34 WS 끊김 → approval key 발급 실패(KIS oauth2 일시장애) →
+    //            doConnect()가 그대로 return → 다음 시도 없이 영구 정지 → 09:00 거래에서
+    //            WS 단독 SL/TP 사망 상태로 운영, 003070 -3.84%까지 SL 미작동.
+    // 변경: doConnect 내부에서 approvalKey 실패해도 attemptReconnect() 재호출.
+    //       60회까지 지수 백오프(상한 2분)로 시도 — 1시간 이상 KIS 장애 시에만 포기.
+    private static final int MAX_RECONNECT_ATTEMPTS = 60;
     private static final long BASE_BACKOFF_MS = 1000L;
+    private static final long MAX_BACKOFF_MS = 120_000L; // 상한 2분
 
     private final KisProperties props;
     private final RestTemplate restTemplate;
@@ -192,7 +199,10 @@ public class KisWebSocketClient {
                 approvalKey = fetchApprovalKey();
             }
             if (approvalKey == null) {
-                log.error("[WS] Failed to obtain approval key, cannot connect");
+                log.error("[WS] Failed to obtain approval key, cannot connect — scheduling reconnect");
+                // V41 (2026-05-14): approval 실패해도 재시도 스케줄링.
+                // 이전 동작: return → 영구 정지. 신규: attemptReconnect()로 백오프 재시도.
+                attemptReconnect();
                 return;
             }
 
@@ -256,7 +266,9 @@ public class KisWebSocketClient {
             return;
         }
 
-        long delay = BASE_BACKOFF_MS * (1L << (attempt - 1));
+        // V41: 지수 백오프 상한 2분 (1<<11=2048s 이상 폭주 방지)
+        long raw = BASE_BACKOFF_MS * (1L << Math.min(attempt - 1, 10));
+        long delay = Math.min(raw, MAX_BACKOFF_MS);
         log.info("[WS] Reconnecting in {}ms (attempt {}/{})", delay, attempt, MAX_RECONNECT_ATTEMPTS);
 
         // 비동기 재연결 (별도 스레드)
