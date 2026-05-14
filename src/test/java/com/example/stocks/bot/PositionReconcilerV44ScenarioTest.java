@@ -56,6 +56,8 @@ class PositionReconcilerV44ScenarioTest {
         cfg.setMode("LIVE");
         cfg.setAutoCleanupStuckEnabled(true);
         cfg.setStuckCleanupWhitelist("073540,184230,047040");
+        // V45: max_value=0 으로 화이트리스트 only 모드 (V44 시나리오 호환)
+        cfg.setStuckCleanupMaxValueKrw(0L);
 
         when(configRepo.loadOrCreate()).thenReturn(cfg);
         when(liveOrders.isConfigured()).thenReturn(true);
@@ -76,13 +78,30 @@ class PositionReconcilerV44ScenarioTest {
 
         when(positionRepo.findAll()).thenReturn(new ArrayList<>());
 
-        // 봇 BUY 이력 (trade_log)
-        // 005880 — 봇이 매수 했었음 (04-16) — 하지만 SELL 도 같이 있음 → V42 hasBotBuyHistory 는 true 반환
-        when(tradeRepo.findBySymbol("005880")).thenReturn(Arrays.asList(botBuy("005880")));
-        when(tradeRepo.findBySymbol("073540")).thenReturn(Arrays.asList(botBuy("073540")));
-        when(tradeRepo.findBySymbol("184230")).thenReturn(Arrays.asList(botBuy("184230")));
-        when(tradeRepo.findBySymbol("047040")).thenReturn(Arrays.asList(botBuy("047040")));
+        // 봇 BUY 이력 (trade_log) — V45: qty 포함하여 botNet 계산 가능
+        // 005880 — 봇 BUY 24 / SELL 24 (정상 완결) → botNet=0 → 외부 매수로 분류
+        when(tradeRepo.findBySymbol("005880")).thenReturn(Arrays.asList(
+                botBuyQty("005880", 24), botSellQty("005880", 24)));
+        when(tradeRepo.findBySymbol("073540")).thenReturn(Arrays.asList(botBuyQty("073540", 10)));
+        when(tradeRepo.findBySymbol("184230")).thenReturn(Arrays.asList(botBuyQty("184230", 46)));
+        when(tradeRepo.findBySymbol("047040")).thenReturn(Arrays.asList(botBuyQty("047040", 1)));
         // 005930, 012330, 036030 은 default empty list
+    }
+
+    private TradeEntity botBuyQty(String symbol, int qty) {
+        TradeEntity t = botBuy(symbol);
+        t.setQty(qty);
+        return t;
+    }
+
+    private TradeEntity botSellQty(String symbol, int qty) {
+        TradeEntity t = new TradeEntity();
+        t.setSymbol(symbol);
+        t.setAction("SELL");
+        t.setPatternType("KRX_MORNING_RUSH");
+        t.setQty(qty);
+        t.setTsEpochMs(System.currentTimeMillis() - 86400_000L);
+        return t;
     }
 
     private KisAccount kisHolding(String s, int qty, double avg) {
@@ -113,11 +132,12 @@ class PositionReconcilerV44ScenarioTest {
     // ============================================================
 
     @Test
-    @DisplayName("[V44] 분류 단계: 4건 STUCK_BOT_POSITION + 3건 ORPHAN_BROKER")
+    @DisplayName("[V45-final] 분류 단계: 4건 STUCK_BOT_POSITION + 3건 ORPHAN_BROKER (V42 분류 복귀)")
     void classification_v44Scenario() {
         PositionReconciler.ReconcileReport r = reconciler.doReconcile();
 
-        // BUY 이력 있는 4건 (V42 알고리즘) — 005880 false positive 포함
+        // V45-final: 분류는 V42 hasBotBuyHistory 단순 OR. 사용자 보호는 cleanup 시점.
+        // false negative 방지 — 매도 실패 SELL 기록으로 net=0 잡혀서 진짜 STUCK 제외되는 케이스 회귀
         assertEquals(4, r.stuckBotPositions.size());
         assertTrue(r.stuckBotPositions.containsKey("005880"));
         assertTrue(r.stuckBotPositions.containsKey("073540"));

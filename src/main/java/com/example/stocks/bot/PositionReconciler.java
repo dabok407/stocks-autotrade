@@ -97,6 +97,10 @@ public class PositionReconciler {
             if (!report.stuckBotPositions.isEmpty()) {
                 attemptStuckCleanup(report);
             }
+            // V45 (2026-05-14): QTY_MISMATCH 자동 동기화 (brokerQty > dbQty + hasBotBuyHistory)
+            if (!report.qtyMismatches.isEmpty()) {
+                attemptQtyMismatchSync(report);
+            }
         } catch (Exception e) {
             log.error("[Reconciler] failed: {}", e.getMessage(), e);
         }
@@ -147,19 +151,21 @@ public class PositionReconciler {
             }
         }
 
-        // 5. ORPHAN_BROKER vs STUCK_BOT_POSITION 분류
+        // 5. ORPHAN_BROKER vs STUCK_BOT_POSITION 분류 (V42 원본 정책 유지)
+        // V45 (2026-05-14): 분류는 hasBotBuyHistory 단순 OR 유지. botNet 검사는 cleanup 시점에 활용.
+        //   분류 단계에서 net=0 으로 거르면 매도 실패 trade 가 SELL 로 기록된 케이스도 함께 거르는
+        //   false negative 발생 (184230 등 진짜 stuck 인데 ORPHAN_BROKER 로 빠짐).
         for (Map.Entry<String, KisAccount> e : brokerBySymbol.entrySet()) {
             String sym = e.getKey();
             if (dbBySymbol.containsKey(sym)) continue;
 
-            // V42: trade_log 의 patternType=KRX_MORNING_RUSH BUY 이력 검사
             if (hasBotBuyHistory(sym)) {
                 report.stuckBotPositions.put(sym, e.getValue());
                 log.warn("[Reconciler] STUCK_BOT_POSITION symbol={} brokerQty={} avg={} — bot BUY history found, cleanup candidate",
                         sym, e.getValue().getQty(), e.getValue().getAvgPrice());
             } else {
                 report.orphanBroker.add(sym);
-                log.info("[Reconciler] ORPHAN_BROKER symbol={} brokerQty={} avg={} — held outside bot scope",
+                log.info("[Reconciler] ORPHAN_BROKER symbol={} brokerQty={} avg={} — outside bot scope",
                         sym, e.getValue().getQty(), e.getValue().getAvgPrice());
             }
         }
@@ -187,6 +193,47 @@ public class PositionReconciler {
     }
 
     /**
+     * V45 (2026-05-14): 봇이 매수한 총량 (SELL 무관).
+     *
+     * 안전 분류 기준:
+     *   - broker_qty <= botBuyTotal: 봇이 매수한 양 이내 → STUCK 후보 (봇 책임)
+     *   - broker_qty >  botBuyTotal: 봇 BUY 보다 많은 잔량 → 사용자 외부 추가 매수 → 보호
+     *
+     * 봇이 매도 실패해도 trade_log 에 SELL 이 기록되는 케이스가 있어, net=buy-sell 보다
+     * 단순 buy 합산이 안전. SELL 실패가 net 0 으로 잘못 잡히는 false negative 방지.
+     */
+    int calculateBotBuyTotal(String symbol) {
+        try {
+            List<TradeEntity> trades = tradeLogRepo.findBySymbol(symbol);
+            int buy = 0;
+            for (TradeEntity t : trades) {
+                if (!ENTRY_STRATEGY.equals(t.getPatternType())) continue;
+                if ("BUY".equalsIgnoreCase(t.getAction())) buy += t.getQty();
+            }
+            return buy;
+        } catch (Exception e) {
+            log.warn("[Reconciler] calculateBotBuyTotal failed for {}: {}", symbol, e.getMessage());
+            return 0;
+        }
+    }
+
+    /** V45 (2026-05-14): 봇 SELL 총량 — net=0 검사용 (사용자 외부 매수 보호) */
+    int calculateBotSellTotal(String symbol) {
+        try {
+            List<TradeEntity> trades = tradeLogRepo.findBySymbol(symbol);
+            int sell = 0;
+            for (TradeEntity t : trades) {
+                if (!ENTRY_STRATEGY.equals(t.getPatternType())) continue;
+                if ("SELL".equalsIgnoreCase(t.getAction())) sell += t.getQty();
+            }
+            return sell;
+        } catch (Exception e) {
+            log.warn("[Reconciler] calculateBotSellTotal failed for {}: {}", symbol, e.getMessage());
+            return 0;
+        }
+    }
+
+    /**
      * V42: STUCK_BOT_POSITION 자동 시장가 매도.
      * 안전장치 다중 적용.
      */
@@ -197,10 +244,12 @@ public class PositionReconciler {
             log.debug("[Reconciler] auto cleanup stuck DISABLED (master switch)");
             return;
         }
-        // V43 (2026-05-06): 화이트리스트 검증 — 비어있으면 매도 안 함
+        // V43 (2026-05-06): 화이트리스트 — 명시 등록 종목은 무한도 매도
+        // V45 (2026-05-14): 화이트리스트 비어있어도 stuck_cleanup_max_value_krw 이하면 매도
         Set<String> whitelist = cfg.getStuckCleanupWhitelistSet();
-        if (whitelist.isEmpty()) {
-            log.info("[Reconciler] stuck cleanup whitelist EMPTY — no symbols will be auto-sold. " +
+        long maxValueLimit = cfg.getStuckCleanupMaxValueKrw();
+        if (whitelist.isEmpty() && maxValueLimit <= 0) {
+            log.info("[Reconciler] stuck cleanup whitelist EMPTY AND max_value_krw=0 — no auto-sell. " +
                     "stuck candidates: {}", report.stuckBotPositions.keySet());
             return;
         }
@@ -221,11 +270,37 @@ public class PositionReconciler {
             return;
         }
 
+        // V45 (2026-05-14): 화이트리스트 + 금액 한도 자동 매도 병행.
+        //   - 화이트리스트 명시: 무한도 자동 매도 (사용자 명시 동의)
+        //   - 화이트리스트 외: stuck_cleanup_max_value_krw 이하만 자동 매도 (큰 자산 보호)
         for (Map.Entry<String, KisAccount> e : report.stuckBotPositions.entrySet()) {
             String sym = e.getKey();
-            // V43: 화이트리스트에 명시된 symbol 만 매도
-            if (!whitelist.contains(sym)) {
-                log.info("[Reconciler] STUCK_CLEANUP SKIP symbol={} — not in whitelist", sym);
+            int qty = e.getValue().getQty();
+            double avg = e.getValue().getAvgPrice();
+            long totalValue = (long) (qty * avg);
+
+            // V45 안전장치 강화 (2026-05-14): 사용자 외부 매수 다중 검사.
+            //   (1) botBuyTotal < brokerQty: 봇 BUY 보다 많은 잔량 → 외부 매수 명백.
+            //   (2) botBuy == botSell > 0 (net=0): 봇 거래는 정상 완결됨 → broker 잔량은 외부.
+            //       005880 케이스 (BUY 24/SELL 24, broker 24 별도 평단 = 외부 매수).
+            //   둘 중 하나라도 의심되면 화이트리스트 없는 한 SKIP.
+            int botBuyTotal = calculateBotBuyTotal(sym);
+            int botSellTotal = calculateBotSellTotal(sym);
+            boolean externalBuySuspected = (botBuyTotal < qty)
+                    || (botBuyTotal > 0 && botBuyTotal == botSellTotal);
+            // 화이트리스트 명시 종목은 사용자 의도 → 외부 매수 검사 우회 가능
+            boolean inWhitelist = whitelist.contains(sym);
+            if (externalBuySuspected && !inWhitelist) {
+                log.warn("[Reconciler] STUCK_CLEANUP SKIP symbol={} qty={} avg={} — external buy suspected (botBuy={} botSell={} broker={})",
+                        sym, qty, avg, botBuyTotal, botSellTotal, qty);
+                continue;
+            }
+
+            // V45 변경: 화이트리스트 또는 금액 한도 이하 → 매도
+            boolean underValueLimit = (maxValueLimit > 0 && totalValue <= maxValueLimit);
+            if (!inWhitelist && !underValueLimit) {
+                log.info("[Reconciler] STUCK_CLEANUP SKIP symbol={} qty={} avg={} value={} — not in whitelist AND value > {} (limit)",
+                        sym, qty, avg, totalValue, maxValueLimit);
                 continue;
             }
             // 같은 세션 반복 시도 방지
@@ -235,9 +310,8 @@ public class PositionReconciler {
             }
             attemptedCleanupSymbols.add(sym);
 
-            int qty = e.getValue().getQty();
-            double avg = e.getValue().getAvgPrice();
-            log.warn("[Reconciler] STUCK_CLEANUP TRY symbol={} qty={} avg={}", sym, qty, avg);
+            log.warn("[Reconciler] STUCK_CLEANUP TRY symbol={} qty={} avg={} value={} reason={}",
+                    sym, qty, avg, totalValue, inWhitelist ? "whitelist" : "under-value-limit");
 
             try {
                 // 시장가 매도 — P0-Fix#2 활용 (ordType="01")
@@ -258,6 +332,64 @@ public class PositionReconciler {
             } catch (Exception ex) {
                 log.error("[Reconciler] STUCK_CLEANUP EXCEPTION symbol={}: {}", sym, ex.getMessage(), ex);
                 report.cleanupFailed.add(sym);
+            }
+        }
+    }
+
+    /**
+     * V45 (2026-05-14): QTY_MISMATCH 자동 동기화.
+     *
+     * brokerQty > dbQty 이고 hasBotBuyHistory==true 일 때 봇 DB qty 를 broker 기준으로 업데이트.
+     *
+     * 시나리오:
+     *   - 봇 BUY 78주 주문 → broker 분할체결 156주 (외부 매수 X, 봇 응답 파싱 실패)
+     *   - 봇 DB 78주, broker 156주 — QTY_MISMATCH 영구 누적
+     *
+     * 해결:
+     *   - hasBotBuyHistory==true 검증 (사용자 외부 매수 차단)
+     *   - 봇 DB qty → broker qty 로 sync (자산 가치 변화 없음, 단지 봇 시야 확대)
+     *   - 이후 정상 SL/TP·SESSION_END 시 전량 청산 가능
+     *
+     * 안전장치:
+     *   - brokerQty < dbQty 인 경우는 sync 안 함 (broker 가 봇보다 적으면 broker 진실)
+     *   - hasBotBuyHistory == false 인 경우 sync 안 함 (사용자 본인 매수)
+     *   - config.qty_mismatch_auto_sync_enabled = false 면 sync 안 함
+     */
+    void attemptQtyMismatchSync(ReconcileReport report) {
+        KrxMorningRushConfigEntity cfg = loadCfgSafe();
+        if (cfg == null || !cfg.isQtyMismatchAutoSyncEnabled()) {
+            log.debug("[Reconciler] qty mismatch auto sync DISABLED");
+            return;
+        }
+        for (Map.Entry<String, int[]> e : report.qtyMismatches.entrySet()) {
+            String sym = e.getKey();
+            int dbQty = e.getValue()[0];
+            int brokerQty = e.getValue()[1];
+
+            // broker 가 봇보다 적으면 sync 안 함 (broker 가 SELL 후 정산 중일 수 있음)
+            if (brokerQty <= dbQty) {
+                log.info("[Reconciler] QTY_MISMATCH_SYNC SKIP symbol={} dbQty={} brokerQty={} — broker not larger",
+                        sym, dbQty, brokerQty);
+                continue;
+            }
+            // 봇 BUY 이력 없는 사용자 외부 매수 차단
+            if (!hasBotBuyHistory(sym)) {
+                log.info("[Reconciler] QTY_MISMATCH_SYNC SKIP symbol={} — no bot BUY history (user external buy)",
+                        sym);
+                continue;
+            }
+
+            try {
+                PositionEntity p = positionRepo.findById(sym).orElse(null);
+                if (p == null) continue;
+                int oldQty = p.getQty();
+                p.setQty(brokerQty);
+                p.setUpdatedAt(java.time.Instant.now());
+                positionRepo.save(p);
+                log.warn("[Reconciler] QTY_MISMATCH_SYNC OK symbol={} dbQty={} → brokerQty={} (synced, bot BUY history confirmed)",
+                        sym, oldQty, brokerQty);
+            } catch (Exception ex) {
+                log.error("[Reconciler] QTY_MISMATCH_SYNC FAIL symbol={}: {}", sym, ex.getMessage(), ex);
             }
         }
     }

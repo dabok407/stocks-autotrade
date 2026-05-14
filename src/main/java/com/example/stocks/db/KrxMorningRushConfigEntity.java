@@ -134,6 +134,24 @@ public class KrxMorningRushConfigEntity {
     @Column(name = "stuck_cleanup_whitelist", length = 500, nullable = false)
     private String stuckCleanupWhitelist = "";
 
+    /**
+     * V42 (2026-05-14): stuck cleanup 자동 매도 자산 한도 (원).
+     * hasBotBuyHistory==true 종목 중 (qty × avgPrice) ≤ 이 값 인 경우 화이트리스트 없이 자동 매도.
+     * 큰 자산은 화이트리스트 명시 필요 (오작동 시 손해 제한).
+     * default 500,000원 — STUCK 종목 평균 수십만원대 처리에 충분.
+     */
+    @Column(name = "stuck_cleanup_max_value_krw", nullable = false)
+    private long stuckCleanupMaxValueKrw = 500_000L;
+
+    /**
+     * V42 (2026-05-14): QTY_MISMATCH 자동 동기화 활성화.
+     * brokerQty > dbQty 이고 hasBotBuyHistory==true 일 때 봇 DB qty 를 brokerQty 로 업데이트.
+     * 분할 체결로 봇이 일부만 인식한 케이스 자동 복구.
+     * default true.
+     */
+    @Column(name = "qty_mismatch_auto_sync_enabled", nullable = false)
+    private boolean qtyMismatchAutoSyncEnabled = true;
+
     // ========== Getters & Setters ==========
 
     public int getId() { return id; }
@@ -237,6 +255,12 @@ public class KrxMorningRushConfigEntity {
 
     public String getStuckCleanupWhitelist() { return stuckCleanupWhitelist != null ? stuckCleanupWhitelist : ""; }
     public void setStuckCleanupWhitelist(String v) { this.stuckCleanupWhitelist = v != null ? v.trim() : ""; }
+
+    public long getStuckCleanupMaxValueKrw() { return stuckCleanupMaxValueKrw; }
+    public void setStuckCleanupMaxValueKrw(long v) { this.stuckCleanupMaxValueKrw = Math.max(0L, v); }
+
+    public boolean isQtyMismatchAutoSyncEnabled() { return qtyMismatchAutoSyncEnabled; }
+    public void setQtyMismatchAutoSyncEnabled(boolean v) { this.qtyMismatchAutoSyncEnabled = v; }
 
     /** stuck_cleanup_whitelist CSV 를 Set 으로 파싱. */
     public Set<String> getStuckCleanupWhitelistSet() {

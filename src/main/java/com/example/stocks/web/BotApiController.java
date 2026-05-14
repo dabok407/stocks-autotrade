@@ -1,13 +1,18 @@
 package com.example.stocks.web;
 
 import com.example.stocks.bot.BotStatus;
+import com.example.stocks.bot.PositionReconciler;
 import com.example.stocks.bot.TradingBotService;
 import com.example.stocks.db.BotConfigEntity;
 import com.example.stocks.db.BotConfigRepository;
+import com.example.stocks.db.PositionEntity;
+import com.example.stocks.db.PositionRepository;
 import com.example.stocks.db.StockConfigEntity;
 import com.example.stocks.db.TradeEntity;
 import com.example.stocks.db.TradeRepository;
 import com.example.stocks.exchange.ExchangeAdapter;
+import com.example.stocks.kis.KisAccount;
+import com.example.stocks.kis.KisPrivateClient;
 import com.example.stocks.market.MarketType;
 import com.example.stocks.trade.SymbolNameService;
 
@@ -28,15 +33,22 @@ public class BotApiController {
     private final ExchangeAdapter exchangeAdapter;
     private final BotConfigRepository botConfigRepo;
     private final SymbolNameService symbolNameService;
+    // V42 (2026-05-14): 웹 UI 보유 포지션 표시 누락 수정 — MR/Opening 포지션 + STUCK broker 포지션 노출
+    private final PositionRepository positionRepo;
+    private final PositionReconciler positionReconciler;
 
     public BotApiController(TradingBotService bot, TradeRepository tradeRepo,
                             ExchangeAdapter exchangeAdapter, BotConfigRepository botConfigRepo,
-                            SymbolNameService symbolNameService) {
+                            SymbolNameService symbolNameService,
+                            PositionRepository positionRepo,
+                            PositionReconciler positionReconciler) {
         this.bot = bot;
         this.tradeRepo = tradeRepo;
         this.exchangeAdapter = exchangeAdapter;
         this.botConfigRepo = botConfigRepo;
         this.symbolNameService = symbolNameService;
+        this.positionRepo = positionRepo;
+        this.positionReconciler = positionReconciler;
     }
 
     @PostMapping("/api/bot/start")
@@ -102,19 +114,98 @@ public class BotApiController {
         return bot.getRecentDecisionLogs(200);
     }
 
+    /**
+     * V42 (2026-05-14): 모든 보유 포지션 통합 노출.
+     *
+     * 이전 동작: TradingBotService.getStatus().getStocks() 만 → stock_config에 등록된 종목 (005930·012330)만 표시.
+     * MR/Opening 스캐너 매수 종목은 positions 테이블에 있지만 BotStatus.stocks 맵에 없어서 UI에 안 보임.
+     * STUCK 종목 (broker엔 있는데 봇 DB엔 없는 잔여) 도 깜깜이.
+     *
+     * 신규 동작: 3가지 출처 통합 노출
+     *  (a) BotStatus.stocks 의 positionOpen=true (메인 봇 stock_config 종목)
+     *  (b) positions 테이블의 모든 qty>0 (MR/Opening/MainBot 모두)
+     *  (c) PositionReconciler.stuckBotPositions (broker엔 있으나 봇 DB엔 없는 STUCK)
+     * 심볼별 중복 제거. (a)·(b) 가 동일 심볼이면 (b) 우선 (실제 DB가 fact).
+     */
     @GetMapping("/api/bot/positions")
     public Object positions() {
+        Map<String, BotStatus.StockStatus> result = new LinkedHashMap<String, BotStatus.StockStatus>();
+
+        // (a) BotStatus.stocks 중 positionOpen=true
         BotStatus status = bot.getStatus();
-        Map<String, BotStatus.StockStatus> stocks = status.getStocks();
-        List<BotStatus.StockStatus> openPositions = new ArrayList<BotStatus.StockStatus>();
-        if (stocks != null) {
-            for (BotStatus.StockStatus ss : stocks.values()) {
-                if (ss.isPositionOpen()) {
-                    openPositions.add(ss);
+        Map<String, BotStatus.StockStatus> botStocks = status.getStocks();
+        if (botStocks != null) {
+            for (BotStatus.StockStatus ss : botStocks.values()) {
+                if (ss.isPositionOpen() && ss.getSymbol() != null) {
+                    result.put(ss.getSymbol(), ss);
                 }
             }
         }
-        return openPositions;
+
+        // (b) positions 테이블의 모든 qty>0 (MR/Opening 포함). 동일 심볼은 fact로 덮어씀.
+        for (PositionEntity p : positionRepo.findAll()) {
+            if (p.getQty() <= 0 || p.getSymbol() == null) continue;
+            BotStatus.StockStatus ss = result.get(p.getSymbol());
+            if (ss == null) {
+                ss = new BotStatus.StockStatus();
+                ss.setSymbol(p.getSymbol());
+            }
+            ss.setPositionOpen(true);
+            ss.setQty(p.getQty());
+            ss.setAvgPrice(p.getAvgPrice() != null ? p.getAvgPrice().doubleValue() : 0);
+            ss.setEntryStrategy(p.getEntryStrategy());
+            if (ss.getMarketType() == null) ss.setMarketType("KRX");
+            result.put(p.getSymbol(), ss);
+        }
+
+        // (c) STUCK_BOT_POSITION — broker 잔량 (봇 DB 미인식) 표시
+        PositionReconciler.ReconcileReport rep = positionReconciler.getLastReport();
+        if (rep != null) {
+            for (Map.Entry<String, KisAccount> e : rep.stuckBotPositions.entrySet()) {
+                String sym = e.getKey();
+                if (result.containsKey(sym)) continue; // 봇 DB에 이미 있으면 중복 안 함
+                KisAccount acc = e.getValue();
+                BotStatus.StockStatus ss = new BotStatus.StockStatus();
+                ss.setSymbol(sym);
+                ss.setPositionOpen(true);
+                ss.setQty(acc.getQty());
+                ss.setAvgPrice(acc.getAvgPrice());
+                ss.setEntryStrategy("STUCK_BROKER_ONLY"); // 봇 DB 없음 표식
+                ss.setMarketType("KRX");
+                result.put(sym, ss);
+            }
+            // (d) QTY_MISMATCH — broker qty 가 더 많으면 qty 를 broker 기준으로 덮어씀
+            //     (사용자가 화면에서 broker 진실을 보도록)
+            for (Map.Entry<String, int[]> e : rep.qtyMismatches.entrySet()) {
+                String sym = e.getKey();
+                int dbQty = e.getValue()[0];
+                int brokerQty = e.getValue()[1];
+                BotStatus.StockStatus ss = result.get(sym);
+                if (ss != null && brokerQty > dbQty) {
+                    ss.setQty(brokerQty);
+                    // entryStrategy 에 "+잔량N" 표식
+                    String orig = ss.getEntryStrategy() == null ? "" : ss.getEntryStrategy();
+                    ss.setEntryStrategy(orig + " [broker+" + (brokerQty - dbQty) + "]");
+                }
+            }
+        }
+
+        // 종목명 채움
+        Set<String> symbolsToResolve = new HashSet<String>();
+        for (BotStatus.StockStatus ss : result.values()) {
+            if (ss.getDisplayName() == null) symbolsToResolve.add(ss.getSymbol());
+        }
+        if (!symbolsToResolve.isEmpty()) {
+            Map<String, String> nameMap = symbolNameService.getNames(symbolsToResolve);
+            for (BotStatus.StockStatus ss : result.values()) {
+                if (ss.getDisplayName() == null) {
+                    String nm = nameMap.get(ss.getSymbol());
+                    if (nm != null) ss.setDisplayName(nm);
+                }
+            }
+        }
+
+        return new ArrayList<BotStatus.StockStatus>(result.values());
     }
 
     /**

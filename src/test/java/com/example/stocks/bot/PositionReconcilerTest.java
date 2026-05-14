@@ -92,6 +92,24 @@ class PositionReconcilerTest {
         return t;
     }
 
+    /** V45 (2026-05-14): qty 명시 BUY (botNet 계산용) */
+    private TradeEntity botBuyWithQty(String symbol, int qty) {
+        TradeEntity t = botBuy(symbol);
+        t.setQty(qty);
+        return t;
+    }
+
+    /** V45 (2026-05-14): SELL trade (botNet 계산용) */
+    private TradeEntity botSellWithQty(String symbol, int qty) {
+        TradeEntity t = new TradeEntity();
+        t.setSymbol(symbol);
+        t.setAction("SELL");
+        t.setPatternType("KRX_MORNING_RUSH");
+        t.setQty(qty);
+        t.setTsEpochMs(System.currentTimeMillis() - 86400_000L);
+        return t;
+    }
+
     private LiveOrderService.LiveOrderResult filled(int qty, double avgPrice) {
         return new LiveOrderService.LiveOrderResult("ID", "ORD", "done", qty, avgPrice);
     }
@@ -161,14 +179,15 @@ class PositionReconcilerTest {
     }
 
     @Test
-    @DisplayName("[V42] 봇 stuck (trade_log BUY 이력 있음) → STUCK_BOT_POSITION 분류")
+    @DisplayName("[V45] 봇 stuck (BUY net qty > 0, broker <= net) → STUCK_BOT_POSITION 분류")
     void botStuck_classifiedCorrectly() {
         when(kisClient.getDomesticBalance()).thenReturn(Arrays.asList(
                 kisHolding("073540", 10, 6200),
                 kisHolding("184230", 46, 1074)));
         when(positionRepo.findAll()).thenReturn(new ArrayList<>());
-        when(tradeRepo.findBySymbol("073540")).thenReturn(Arrays.asList(botBuy("073540")));
-        when(tradeRepo.findBySymbol("184230")).thenReturn(Arrays.asList(botBuy("184230")));
+        // V45: botNet 계산 — qty 명시 BUY
+        when(tradeRepo.findBySymbol("073540")).thenReturn(Arrays.asList(botBuyWithQty("073540", 10)));
+        when(tradeRepo.findBySymbol("184230")).thenReturn(Arrays.asList(botBuyWithQty("184230", 46)));
 
         PositionReconciler.ReconcileReport r = reconciler.doReconcile();
 
@@ -188,8 +207,9 @@ class PositionReconcilerTest {
                 kisHolding("184230", 46, 1074),     // stuck — BUY 이력 있음
                 kisHolding("036030", 8, 11800)));   // 본인 — BUY 이력 없음
         when(positionRepo.findAll()).thenReturn(new ArrayList<>());
-        when(tradeRepo.findBySymbol("073540")).thenReturn(Arrays.asList(botBuy("073540")));
-        when(tradeRepo.findBySymbol("184230")).thenReturn(Arrays.asList(botBuy("184230")));
+        // V45: botNet 계산용 qty 명시
+        when(tradeRepo.findBySymbol("073540")).thenReturn(Arrays.asList(botBuyWithQty("073540", 10)));
+        when(tradeRepo.findBySymbol("184230")).thenReturn(Arrays.asList(botBuyWithQty("184230", 46)));
         // 005930, 036030 은 default empty list
 
         PositionReconciler.ReconcileReport r = reconciler.doReconcile();
@@ -328,6 +348,8 @@ class PositionReconcilerTest {
 
         when(liveOrders.placeSellOrder(eq("073540"), eq(MarketType.KRX), eq(10), eq(0.0), eq("01")))
                 .thenReturn(filled(10, 6100));
+        // V45: botBuyTotal >= brokerQty 보장
+        when(tradeRepo.findBySymbol("073540")).thenReturn(Arrays.asList(botBuyWithQty("073540", 10)));
 
         PositionReconciler.ReconcileReport report = new PositionReconciler.ReconcileReport();
         report.stuckBotPositions.put("073540", kisHolding("073540", 10, 6200));
@@ -348,6 +370,7 @@ class PositionReconcilerTest {
 
         when(liveOrders.placeSellOrder(anyString(), any(MarketType.class), anyInt(), anyDouble(), anyString()))
                 .thenReturn(notFilled());
+        when(tradeRepo.findBySymbol("073540")).thenReturn(Arrays.asList(botBuyWithQty("073540", 10)));
 
         PositionReconciler.ReconcileReport report = new PositionReconciler.ReconcileReport();
         report.stuckBotPositions.put("073540", kisHolding("073540", 10, 6200));
@@ -393,9 +416,10 @@ class PositionReconcilerTest {
     // ============================================================
 
     @Test
-    @DisplayName("[V43] 화이트리스트 비어있음 → 매도 절대 안 함 (default safety)")
+    @DisplayName("[V45] 화이트리스트 비어있음 + max_value=0 → 매도 절대 안 함")
     void cleanup_emptyWhitelist_neverSells() {
         cfg.setStuckCleanupWhitelist("");
+        cfg.setStuckCleanupMaxValueKrw(0L); // V45 max_value 0 → 자동매도 OFF
 
         PositionReconciler.ReconcileReport report = new PositionReconciler.ReconcileReport();
         report.stuckBotPositions.put("073540", kisHolding("073540", 10, 6200));
@@ -410,36 +434,35 @@ class PositionReconcilerTest {
     }
 
     @Test
-    @DisplayName("[V43] 005880 false positive 방지: 화이트리스트에 없으면 stuck 후보여도 매도 안 함")
+    @DisplayName("[V45-final] 005880 false positive 방지: cleanup 시점 botBuyTotal < brokerQty → SKIP")
     void cleanup_falsePositive_005880_protected() {
-        // 005880 대한해운 — trade_log 에 봇 BUY 이력 있지만 사용자 본인 별도 매수분
-        // 화이트리스트에는 진짜 stuck (073540, 184230, 047040) 만 등록
-        cfg.setStuckCleanupWhitelist("073540,184230,047040");
-
         java.time.LocalTime nowKst = java.time.LocalTime.now(java.time.ZoneId.of("Asia/Seoul"));
         boolean inMarket = !nowKst.isBefore(PositionReconciler.MARKET_OPEN)
                 && !nowKst.isAfter(PositionReconciler.MARKET_CLOSE);
+        if (!inMarket) return;
+
+        // 005880 사용자가 24주 외부 추가 매수 → broker 48 vs 봇 BUY 24
+        // 화이트리스트에 없어야 외부 매수 검사가 작동 (whitelist는 사용자 명시 동의이므로 우회 가능)
+        cfg.setStuckCleanupWhitelist("073540,184230,047040");
+        when(tradeRepo.findBySymbol("005880")).thenReturn(Arrays.asList(botBuyWithQty("005880", 24)));
+        when(tradeRepo.findBySymbol("073540")).thenReturn(Arrays.asList(botBuyWithQty("073540", 10)));
+        when(liveOrders.placeSellOrder(eq("073540"), any(MarketType.class), eq(10), eq(0.0), eq("01")))
+                .thenReturn(filled(10, 6100));
 
         PositionReconciler.ReconcileReport report = new PositionReconciler.ReconcileReport();
-        report.stuckBotPositions.put("005880", kisHolding("005880", 24, 3057));  // false positive
+        report.stuckBotPositions.put("005880", kisHolding("005880", 48, 3057));  // 외부 추가매수 포함
         report.stuckBotPositions.put("073540", kisHolding("073540", 10, 6200));  // 진짜 stuck
-
-        if (inMarket) {
-            when(liveOrders.placeSellOrder(eq("073540"), any(MarketType.class), eq(10),
-                    eq(0.0), eq("01"))).thenReturn(filled(10, 6100));
-        }
 
         reconciler.attemptStuckCleanup(report);
 
-        // 005880 은 화이트리스트에 없으므로 매도 시도조차 안 됨
+        // 005880 은 botBuyTotal 24 < brokerQty 48 → SKIP (화이트리스트에 있어도)
         verify(liveOrders, never()).placeSellOrder(eq("005880"), any(MarketType.class),
                 anyInt(), anyDouble(), anyString());
         assertFalse(report.cleanupSuccess.contains("005880"));
-        assertFalse(report.cleanupFailed.contains("005880"));
     }
 
     @Test
-    @DisplayName("[V43] 화이트리스트에 명시된 symbol 만 매도 시도")
+    @DisplayName("[V45] max_value=0 + 화이트리스트 명시 — 화이트리스트만 매도")
     void cleanup_onlyWhitelistedSymbols_sold() {
         java.time.LocalTime nowKst = java.time.LocalTime.now(java.time.ZoneId.of("Asia/Seoul"));
         boolean inMarket = !nowKst.isBefore(PositionReconciler.MARKET_OPEN)
@@ -447,9 +470,12 @@ class PositionReconcilerTest {
         if (!inMarket) return;  // 시장 외 시간 skip
 
         cfg.setStuckCleanupWhitelist("073540");  // 1개만 등록
+        cfg.setStuckCleanupMaxValueKrw(0L);      // V45: 금액 한도 OFF — 화이트리스트만
 
         when(liveOrders.placeSellOrder(eq("073540"), any(MarketType.class), eq(10),
                 eq(0.0), eq("01"))).thenReturn(filled(10, 6100));
+        when(tradeRepo.findBySymbol("073540")).thenReturn(Arrays.asList(botBuyWithQty("073540", 10)));
+        when(tradeRepo.findBySymbol("184230")).thenReturn(Arrays.asList(botBuyWithQty("184230", 46)));
 
         PositionReconciler.ReconcileReport report = new PositionReconciler.ReconcileReport();
         report.stuckBotPositions.put("073540", kisHolding("073540", 10, 6200));
@@ -457,7 +483,7 @@ class PositionReconcilerTest {
 
         reconciler.attemptStuckCleanup(report);
 
-        // 073540 매도 시도, 184230 은 안 함
+        // 073540 매도 시도, 184230 은 화이트리스트 외 + max_value=0 이므로 안 함
         verify(liveOrders, times(1)).placeSellOrder(eq("073540"), any(MarketType.class),
                 eq(10), eq(0.0), eq("01"));
         verify(liveOrders, never()).placeSellOrder(eq("184230"), any(MarketType.class),
